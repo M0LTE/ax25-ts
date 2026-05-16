@@ -60,6 +60,8 @@ To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTr
 
 ## Scope — what's in v0.1, what's deliberately out
 
+> The tables below are the consumer-facing view of *this runtime's* scope. For the **cross-runtime** view — which capabilities exist in C# but not TS (or vice versa), which transports each runtime ships, which SDL subroutines are wired where — see [`docs/runtime-capability-matrix.md`](../../docs/runtime-capability-matrix.md). The matrix is the canonical multi-runtime status doc; the tables here stay focused on `@packet-net/ax25` itself.
+
 ### In
 
 - Frame codec for U/S/I frames (mod-8): SABM, UA, DISC, DM, UI, RR, RNR, REJ, I.
