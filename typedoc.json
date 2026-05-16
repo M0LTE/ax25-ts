@@ -1,0 +1,39 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["src/index.ts", "src/tcp-transport.ts"],
+  "entryPointStrategy": "expand",
+  "out": "../../docs/web-ax25/api",
+  "plugin": ["typedoc-plugin-markdown"],
+  "readme": "none",
+  "githubPages": false,
+  "gitRevision": "main",
+  "hideGenerator": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeInternal": true,
+  "excludeExternals": true,
+  "skipErrorChecking": true,
+  "exclude": [
+    "src/sdl/**",
+    "src/node-types.d.ts",
+    "**/*.test.ts",
+    "tests/**"
+  ],
+  "validation": {
+    "notExported": false,
+    "invalidLink": true,
+    "notDocumented": false
+  },
+  "sort": ["alphabetical"],
+  "treatWarningsAsErrors": false,
+  "useCodeBlocks": true,
+  "expandObjects": true,
+  "parametersFormat": "table",
+  "propertiesFormat": "table",
+  "enumMembersFormat": "table",
+  "typeDeclarationFormat": "table",
+  "indexFormat": "table",
+  "fileExtension": ".md",
+  "hidePageHeader": false,
+  "hideBreadcrumbs": false
+}

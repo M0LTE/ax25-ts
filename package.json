@@ -1,0 +1,52 @@
+{
+  "name": "@packet-net/ax25",
+  "version": "0.1.0",
+  "description": "Browser-targeted TypeScript library for AX.25 v2.2 connected-mode sessions over Web Serial KISS modems.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./tcp-transport": {
+      "types": "./dist/tcp-transport.d.ts",
+      "default": "./dist/tcp-transport.js"
+    }
+  },
+  "files": [
+    "dist/**",
+    "src/**",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "typecheck:examples": "tsc --noEmit --project tsconfig.examples.json",
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "docs": "typedoc"
+  },
+  "dependencies": {
+    "ax25sdl": "file:../../ts-spec"
+  },
+  "devDependencies": {
+    "@types/w3c-web-serial": "^1.0.6",
+    "typedoc": "^0.28.19",
+    "typedoc-plugin-markdown": "^4.11.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  },
+  "keywords": [
+    "ax25",
+    "amateur-radio",
+    "ham-radio",
+    "packet-radio",
+    "kiss",
+    "tnc",
+    "web-serial"
+  ],
+  "license": "MIT"
+}
