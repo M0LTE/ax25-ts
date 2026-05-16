@@ -4,9 +4,17 @@ All notable changes to `@packet-net/ax25` will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Subject lines stay short by convention; bodies wrap to the GitHub viewer's viewport.
 
-## [0.1.0] — UNRELEASED
+## [0.1.1] — 2026-05-16
 
-First public release. Covers AX.25 v2.2 connected-mode happy-path interop with LinBPQ, Xrouter, rax25, and direwolf-style KISS-TCP listeners. Not yet on npmjs.com — see [`docs/web-ax25/publishing.md`](../../docs/web-ax25/publishing.md).
+Documentation fix. No code changes — `0.1.1` ships only to scrub a stale pre-publish notice that leaked into `0.1.0`'s `README.md` (a `> [!NOTE]` callout claiming the package was not yet on npm, which is wrong now that `0.1.0` has shipped). Republishing flushes the notice off the npmjs.com package page.
+
+### Changed
+
+- README: removed the pre-publish "not yet on npm" callout. `0.1.0`'s README on npmjs.com still shows it; consumers should pull `^0.1.1`.
+
+## [0.1.0] — 2026-05-16
+
+First public release. Covers AX.25 v2.2 connected-mode happy-path interop with LinBPQ, Xrouter, rax25, and direwolf-style KISS-TCP listeners. Published to npmjs.com from the self-hosted CI runner.
 
 ### Added
 

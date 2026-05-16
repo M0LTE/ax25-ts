@@ -8,9 +8,6 @@ Browser-targeted TypeScript library for AX.25 v2.2 connected-mode sessions over 
 npm install @packet-net/ax25
 ```
 
-> [!NOTE]
-> `@packet-net/ax25` is **not yet published to npm**. Until v0.1.0 ships, the package exists only inside this monorepo. Local-dev usage (cloning the repo and running `npm install` from `web/ax25/`) works today; the npm-install line above will succeed once Tom runs the manual `npm publish` documented in [`docs/web-ax25/publishing.md`](../../docs/web-ax25/publishing.md).
-
 ## Quick start (Web Serial)
 
 A complete browser app — open a USB modem, connect to `GB7CIP`, send a line, receive replies, disconnect:
