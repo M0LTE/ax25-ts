@@ -51,11 +51,15 @@ export function createSessionBindings(
   bindings.set("srej_exception_gt_0", () => context.srejExceptionCount > 0);
 
   // ─── Node policy ─────────────────────────────────────────────────────
-  // "Able to establish?" — defer to station policy; default true (match
-  // direwolf's "always willing to accept connections"). Override the
-  // entry in the returned map before handing it to GuardEvaluator if you
-  // need finer-grained acceptance control.
-  bindings.set("able_to_establish", () => true);
+  // "Able to establish?" — defer to station policy; default reads
+  // `acceptIncoming` from the session context (default true — matches
+  // direwolf's "always willing to accept connections"). The
+  // {@link Ax25Listener} flips this flag at the session boundary on a
+  // transient session it has chosen to reject so the SDL t15 path
+  // emits DM. Override the entry in the returned map before handing it
+  // to GuardEvaluator if you need finer-grained acceptance control
+  // (callsign allow-list, channel busy, resource limits).
+  bindings.set("able_to_establish", () => context.acceptIncoming);
 
   // ─── Sequence-variable comparisons (mod-aware) ──────────────────────
   bindings.set("V_s_eq_V_a", () => context.vs === context.va);

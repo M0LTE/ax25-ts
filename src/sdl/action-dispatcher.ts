@@ -1,4 +1,5 @@
 import type { ActionStep } from "ax25sdl";
+import type { Callsign } from "../callsign.js";
 import {
   type Ax25Frame,
   disc,
@@ -513,6 +514,28 @@ export class ActionDispatcher {
 
 // ─── Frame-emission helpers ────────────────────────────────────────────
 
+/**
+ * Return the trigger's inbound digipeater chain reversed, or an empty
+ * array if the trigger has no inbound frame / no digipeaters. The wire
+ * shape of an outbound response to a digipeated inbound frame uses the
+ * inbound chain reversed so the digipeater closest to the responder is
+ * the first hop (AX.25 v2.2 §C.2 Path Construction): inbound SABM via
+ * `[digi1, digi2]` → outbound UA via `[digi2, digi1]`.
+ *
+ * Mirrors `ActionDispatcher.ReversedTriggerPath` from the C# runtime
+ * (PR #141). Returns an empty array (not null) since the frame
+ * factories accept a `digipeaters` chain field unconditionally.
+ */
+function reversedTriggerPath(tx: TransitionContext): Callsign[] {
+  const frame = tx.event.frame;
+  if (!frame || frame.digipeaters.length === 0) return [];
+  const reversed: Callsign[] = [];
+  for (let i = frame.digipeaters.length - 1; i >= 0; i--) {
+    reversed.push(frame.digipeaters[i]!.callsign);
+  }
+  return reversed;
+}
+
 function buildSFrame(
   tx: TransitionContext,
   type: "RR" | "RNR" | "REJ",
@@ -524,6 +547,7 @@ function buildSFrame(
   const opts = {
     destination: ctx.remote,
     source: ctx.local,
+    digipeaters: reversedTriggerPath(tx),
     nr,
     isCommand,
     pollFinal: pf,
@@ -544,6 +568,7 @@ function buildUFrame(
   const factoryOpts = {
     destination: ctx.remote,
     source: ctx.local,
+    digipeaters: reversedTriggerPath(tx),
   };
   if (type === "SABM") return sabm({ ...factoryOpts, pollBit: pf });
   if (type === "DISC") return disc({ ...factoryOpts, pollBit: pf });
@@ -562,6 +587,7 @@ function buildUiFrame(tx: TransitionContext, isCommand: boolean): Ax25Frame {
   return ui({
     destination: ctx.remote,
     source: ctx.local,
+    digipeaters: reversedTriggerPath(tx),
     info: tx.event.data,
     pid: tx.event.pid,
     isCommand,
@@ -583,6 +609,7 @@ function emitIFrame(tx: TransitionContext): void {
   const frame = iFrame({
     destination: ctx.remote,
     source: ctx.local,
+    digipeaters: reversedTriggerPath(tx),
     nr,
     ns,
     info: tx.event.data,

@@ -43,6 +43,59 @@ await stack.stop();
 
 The same code as a typechecking file lives at [`examples/quick-start.ts`](examples/quick-start.ts). Two more end-to-end examples (Node TCP, in-memory mock for unit tests) live alongside it — see [`examples/`](examples/).
 
+## Listening for inbound connections
+
+`Ax25Stack` is outbound-only — it expects you to call `connect({ from, to })` and treats the resulting session as the only one on the modem. For node-style usage (a station that exists to accept inbound connections — a BBS, a gateway, an automatic forwarder, the TUI), reach for `Ax25Listener` instead. The listener owns one transport, address-filters inbound frames against your own callsign, builds (or reuses) a session on the first SABM from each peer, and surfaces `sessionAccepted` so application code can wire per-session handlers.
+
+```ts
+import {
+  Ax25Listener,
+  Callsign,
+} from "@packet-net/ax25";
+import { TcpKissTransport } from "@packet-net/ax25/tcp-transport";
+
+const transport = new TcpKissTransport("127.0.0.1", 8100, { kissPort: 0 });
+const listener = new Ax25Listener(transport, {
+  myCall: Callsign.parse("M0LTE-1"),
+});
+
+listener.onSessionAccepted((session) => {
+  console.log("inbound from", session.context.remote.toString());
+
+  // Send a welcome message — once the session is Connected, the SDL
+  // accepts DL_DATA_request events on this session.
+  session.postEvent({
+    name: "DL_DATA_request",
+    data: new TextEncoder().encode("Hello from packet.net!\r"),
+    pid: 0xf0,
+  });
+
+  // Surface inbound I-frames / disconnects via the upward-signal hook.
+  session.onDataLinkSignal((sig) => {
+    if (sig.type === "DL_DATA_indication") {
+      process.stdout.write(new TextDecoder().decode(sig.data));
+    }
+    if (sig.type === "DL_DISCONNECT_indication" || sig.type === "DL_DISCONNECT_confirm") {
+      console.log("peer disconnected");
+    }
+  });
+});
+
+await listener.start();
+// Application keeps running — the listener accepts inbound connections
+// for the lifetime of the process.
+
+// Flip to refuse new connections (existing ones keep running):
+//   listener.acceptIncoming = false;
+//
+// Or initiate outbound from this listener (shares the per-peer cache):
+//   const session = await listener.connect(Callsign.parse("GB7CIP"));
+```
+
+The full end-to-end example (against a paired in-memory `MockTransport`) lives at [`examples/inbound-listener.ts`](examples/inbound-listener.ts).
+
+Per-peer sessions are cached, surviving disconnect — sequence-variable history and SRT/T1V smoothing carry over to the next connect from the same callsign. The cache evicts LRU past `maxCachedPeers` (default 64).
+
 ## Transport seams
 
 `Ax25Stack` accepts any `Ax25Transport` (a 3-method interface: `start` / `send` / `stop`). The library ships three concrete transports plus a documented "implement-your-own" seam:
@@ -64,7 +117,7 @@ To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTr
 
 ### In
 
-- Frame codec for U/S/I frames (mod-8): SABM, UA, DISC, DM, UI, RR, RNR, REJ, I.
+- Frame codec for U/S/I frames (mod-8): SABM, SABME (factory + classify only — sequence numbers are still mod-8), UA, DISC, DM, UI, RR, RNR, REJ, I.
 - 7-octet callsign codec with SSID + C/H + E-bit handling.
 - KISS framing (FEND/FESC/TFEND/TFESC, multi-port nibble).
 - Web Serial transport for the browser.
@@ -73,7 +126,8 @@ To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTr
 - SABM → UA → Connected, DISC → UA → Disconnected.
 - I-frame TX/RX with V(s)/V(r)/V(a) bookkeeping, k=1 outstanding window, FIFO TX queue.
 - T1 retry capped at N2 (default 10), SDL `RC_eq_N2` guard.
-- Public API: `Ax25Stack`, `Ax25Session`, `Ax25Frame`, `Callsign`, KISS helpers, `Ax25Transport` interface.
+- **Inbound listener** — `Ax25Listener` accepts inbound SABM, fires `sessionAccepted`, caches per-peer sessions with LRU eviction, mirrors AX.25 §C.2 path reversal on responses. See "Listening for inbound connections" below.
+- Public API: `Ax25Stack`, `Ax25Session`, `Ax25Listener`, `Ax25Frame`, `Callsign`, KISS helpers, `Ax25Transport` interface.
 
 ### Out (deliberate — will land in later versions)
 
@@ -87,7 +141,6 @@ To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTr
 | `via` digipeater paths | `stack.connect({ via: [...] })` throws | post-v0.1 |
 | AGW client / server | Not implemented (Node-side; the [Packet.Agw .NET package](../../src/Packet.Agw/) has the working reference impl) | post-v0.1 |
 | Audio modem transport (browser-side AFSK) | Not implemented | post-v0.1 |
-| Inbound connection acceptance | A SABM to us with no matching outbound session is silently dropped — no `onConnectRequest` API yet | post-v0.1 |
 | XID negotiation | Not implemented — defaults used (mod-8, no SREJ) | post-v0.1 |
 | Dynamic T1 (`Select_T1_Value`) | Stub; caller-supplied `t1Ms` is honoured for the lifetime of the session | post-v0.1 |
 
@@ -116,7 +169,8 @@ src/
 ├── transport.ts               Ax25Transport interface
 ├── webserial-transport.ts     KISS over Web Serial port
 ├── tcp-transport.ts           KISS over TCP socket (Node-only)
-├── session.ts                 Public Ax25Stack / Ax25Session — wraps the SDL driver
+├── session.ts                 Public Ax25Stack / Ax25Session — outbound-only convenience facade
+├── listener.ts                Ax25Listener — inbound-accepting node coordinator
 └── sdl/                       Table-walking session engine
     ├── events.ts                  Ax25Event variants (frame-receipt, timer, DL primitives)
     ├── timer-scheduler.ts         T1/T2/T3 arming + isRunning bindings

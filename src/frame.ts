@@ -20,6 +20,7 @@ const CONTROL_PF_BIT = 0x10;
 
 // U-frame control-byte bases (§4.3.3, P/F masked off).
 const CONTROL_SABM = 0x2f;
+const CONTROL_SABME = 0x6f;
 const CONTROL_DISC = 0x43;
 const CONTROL_UA = 0x63;
 const CONTROL_DM = 0x0f;
@@ -36,6 +37,7 @@ const CONTROL_REJ = 0x09;
  */
 export type FrameKind =
   | "SABM"
+  | "SABME"
   | "DISC"
   | "UA"
   | "DM"
@@ -103,6 +105,8 @@ export function classify(frame: Ax25Frame): FrameKind {
   switch (uBase) {
     case CONTROL_SABM:
       return "SABM";
+    case CONTROL_SABME:
+      return "SABME";
     case CONTROL_DISC:
       return "DISC";
     case CONTROL_UA:
@@ -263,6 +267,27 @@ export function sabm(opts: FrameFactoryOpts & { pollBit?: boolean }): Ax25Frame 
   return {
     ...chain,
     control: (CONTROL_SABM | (opts.pollBit ?? true ? CONTROL_PF_BIT : 0)) & 0xff,
+    pid: null,
+    info: new Uint8Array(0),
+  };
+}
+
+/**
+ * Build a SABME (Set Async Balanced Mode Extended, mod-128) command frame.
+ *
+ * The TS runtime doesn't drive mod-128 sequence numbers end-to-end — the
+ * SDL's `version_2_2` predicate plus mod-128 sequence machinery are
+ * gated behind the `isExtended` context flag, which the runtime
+ * doesn't flip on its own. The factory + classify branch are wired
+ * so {@link Ax25Listener} tests can inject a SABME-shaped frame and
+ * the SDL's `SABME_received` event arm fires.
+ */
+export function sabme(opts: FrameFactoryOpts & { pollBit?: boolean }): Ax25Frame {
+  const { destination, source, digipeaters = [] } = opts;
+  const chain = makeAddressChain(destination, source, digipeaters, true);
+  return {
+    ...chain,
+    control: (CONTROL_SABME | (opts.pollBit ?? true ? CONTROL_PF_BIT : 0)) & 0xff,
     pid: null,
     info: new Uint8Array(0),
   };

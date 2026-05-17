@@ -4,6 +4,36 @@ All notable changes to `@packet-net/ax25` will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Subject lines stay short by convention; bodies wrap to the GitHub viewer's viewport.
 
+## [0.2.0] — 2026-05-16
+
+Adds the `Ax25Listener` class — `@packet-net/ax25` can now act as an inbound-accepting node, the single most valuable parity gap with the C# runtime. Plus two bug-fix carries from the C# runtime that were never quite right in TS either.
+
+`@packet-net/ax25` and the `ax25sdl` companion package bump in lockstep to `0.2.0`. No breaking API changes; `Ax25Stack` and `Ax25Session` keep their existing outbound-only shape (the listener is a sibling class, not a replacement).
+
+### Added
+
+- **`Ax25Listener`** — first-class inbound-acceptance coordinator. Owns one `Ax25Transport`, address-filters inbound frames against `myCall`, dispatches to the per-peer `Ax25ListenerSession` (creating one on first contact — inbound SABM or outbound `listener.connect(remote)`), surfaces `sessionAccepted` + `frameTraced` events, and runs an LRU cache of cached sessions keyed by peer callsign (default cap 64). Mirrors `Packet.Ax25.Session.Ax25Listener` from the C# runtime.
+- **`acceptIncoming` toggle** on `Ax25Listener` — flip to `false` to refuse all new incoming SABMs; existing sessions keep running. The listener responds with DM (figc4.1 t15) to the rejected SABM and doesn't cache the transient session.
+- **Per-peer session cache** — sessions survive disconnect; the same `Ax25ListenerSession` instance is handed back on reconnect, preserving SRT/T1V smoothing and any out-of-SDL context state (e.g. `sentIFrames` between reconnect attempts).
+- **Handler-exception isolation** (#140 carry-over) — every `sessionAccepted` / `frameTraced` subscriber is invoked inside a try/catch; exceptions are routed to a configurable `onHandlerError` sink (default `console.error`) and never escape the inbound pump. A buggy consumer cannot DoS the modem.
+- **`Callsign`-aware `connect()`** on the listener — initiate an outbound SABM against a peer using the same per-peer cache; resolves to the session once DL-CONNECT-confirm arrives.
+- **SABME factory + classifier branch** — `frame.ts` exports a `sabme(...)` factory and `classify(...)` recognises control byte 0x6F. The full mod-128 sequence-number path remains gated on the `version_2_2` predicate (still effectively false in this runtime); the addition is purely so listener tests can inject SABME and exercise figc4.1's t16 branch.
+
+### Fixed
+
+- **#141 carry-over: via-chain reversal on responses.** `ActionDispatcher`'s outbound frame builders now reverse the inbound trigger's digipeater chain when emitting UA / DM / RR / RNR / REJ / I / UI responses. A peer behind a two-hop digipeater chain (`[GB7CIP, MB7UR]`) sending SABM now gets UA back via the reversed chain (`[MB7UR, GB7CIP]`), per AX.25 v2.2 §C.2 Path Construction. Previously the UA had no via-chain on the wire, so the digi closest to the responder never forwarded it.
+- **#143 carry-over: cache-miss DM for non-SABM frames.** When the listener receives a non-SABM frame addressed to us from a peer with no cached session (DISC / RR / RNR / REJ / SREJ / I / FRMR / XID / TEST), it now builds a transient Disconnected session, dispatches the event so the SDL's per-event arm fires (DISC → t13 → DM; everything else → t05 all_other_commands → DM), then drops the transient session without caching it. Previously these frames were silently dropped at the cache-miss filter, leaving the peer's half-open session view hanging.
+
+### Test count
+
+- Unit tests +30 across `Ax25Listener.test.ts` (5), `Ax25ListenerConcurrency.test.ts` (7), `Ax25ListenerMultiPeer.test.ts` (7), `Ax25ListenerRejectAndEdge.test.ts` (10), and `ActionDispatcherViaChain.test.ts` (1) — 1:1 mirror of the 30 C# listener tests.
+- Integration tests +3 across `listener-netsim-multi-peer.test.ts` (2) and `listener-linbpq-initiates.test.ts` (1).
+
+### Known limitations
+
+- Per-peer cache is single-threaded (JS is); the C# listener uses a `ConcurrentDictionary` for the same role. The TS surface is event-driven on a single event loop, so the C# concurrency primitives are unnecessary.
+- The listener-owned session class is exported as `Ax25ListenerSession` to avoid name-collision with the existing `Ax25Session` from `Ax25Stack`. Functionally similar (both wrap an `SdlSessionDriver`) but the API surfaces differ — `Ax25Session` exposes outbound-flavoured `connect` / `write` / `disconnect`; `Ax25ListenerSession` exposes raw `postEvent` + signal subscription.
+
 ## [0.1.1] — 2026-05-16
 
 Documentation fix. No code changes — `0.1.1` ships only to scrub a stale pre-publish notice that leaked into `0.1.0`'s `README.md` (a `> [!NOTE]` callout claiming the package was not yet on npm, which is wrong now that `0.1.0` has shipped). Republishing flushes the notice off the npmjs.com package page.

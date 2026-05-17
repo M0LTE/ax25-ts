@@ -46,6 +46,22 @@ export interface Ax25SessionContext {
   /** SABM(E) was sent by request of Layer 3 (DL-CONNECT request). */
   layer3Initiated: boolean;
 
+  /**
+   * Node-policy flag — when `true` (the default), the session accepts
+   * inbound SABM/SABME frames and runs the figc4.1 t14 / figc4.1 t13
+   * acceptance path. When `false`, figc4.1's `able_to_establish?`
+   * decision falls through to the No branch (t15) which emits DM and
+   * stays Disconnected.
+   *
+   * Per-session because in deployments with multiple sessions on one
+   * modem the policy genuinely differs per peer — a node that has
+   * already accepted one connection still wants the default for
+   * unrelated peer sessions. The {@link Ax25Listener} flips this flag
+   * on a transient session it has chosen to reject so the SDL t15
+   * path emits DM without any wrapper closure.
+   */
+  acceptIncoming: boolean;
+
   /** Saved V(s) for figc4.7's Invoke_Retransmission loop, or null. */
   x: number | null;
   /** True if T1 fired at least once since last Select_T1_Value. */
@@ -117,6 +133,7 @@ export function createSessionContext(
     selectiveRejectException: false,
     srejExceptionCount: 0,
     layer3Initiated: false,
+    acceptIncoming: true,
     x: null,
     t1HadExpired: false,
     t1RemainingWhenLastStoppedMs: 0,

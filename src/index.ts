@@ -49,7 +49,9 @@
  *     don't have real bodies yet)
  *   ✗ Digipeater paths (`via` throws "not implemented")
  *   ✗ TCP/AGW/audio transports — Web Serial only
- *   ✗ Inbound connection acceptance (no `onConnectRequest` API)
+ *   ✓ Inbound connection acceptance via `Ax25Listener` (per-peer
+ *     session cache, `sessionAccepted` / `frameTraced` events, LRU
+ *     eviction). See README "Listening for inbound connections".
  */
 
 export { Callsign } from "./callsign.js";
@@ -107,3 +109,13 @@ export {
   type Ax25SessionOptions,
   Ax25Stack,
 } from "./session.js";
+export {
+  Ax25Listener,
+  Ax25ListenerSession,
+  type Ax25ListenerOptions,
+  type Ax25FrameTracedEvent,
+  type FrameDirection,
+} from "./listener.js";
+export type { Ax25Event } from "./sdl/events.js";
+export type { DataLinkSignal } from "./sdl/action-dispatcher.js";
+export { sabme } from "./frame.js";
