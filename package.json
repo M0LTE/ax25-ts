@@ -30,7 +30,7 @@
     "docs": "typedoc"
   },
   "dependencies": {
-    "ax25sdl": "file:../../ts-spec"
+    "ax25sdl": "^0.1.1"
   },
   "devDependencies": {
     "@types/w3c-web-serial": "^1.0.6",
