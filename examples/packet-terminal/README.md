@@ -59,8 +59,10 @@ command parser maps text input to `stack.connect({from, to})` and
 
 ## Scope
 
-Connected-mode only — no UI/UNPROTO send, no monitor mode, no
-`via` digipeater paths, no mod-128. See `web/ax25/README.md` for the
-full library scope table.
+Connected-mode only — no UI/UNPROTO send, no `via` digipeater
+paths, no mod-128. `MON ON` opts in to BPQ-style passive frame
+tracing in the terminal; the underlying library still has no
+listener / monitor-only role (see `web/ax25/README.md` for the full
+library scope table).
 
 Proudly built with AI assistance.
