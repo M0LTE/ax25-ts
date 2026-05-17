@@ -138,6 +138,83 @@ export class Ax25ListenerSession {
   _setState(state: string): void {
     this.driver.setState(state);
   }
+
+  // ─── Friendly facade — parity with Ax25Session ────────────────────
+  //
+  // The listener-owned session machine is a peer of `Ax25Session` (the
+  // outbound-only facade owned by Ax25Stack). For consumers that just
+  // want the high-level shape — "give me a callback for incoming
+  // bytes, let me write outgoing bytes, tell me when the link drops" —
+  // the methods below mirror `Ax25Session`'s public surface byte-for-
+  // byte so a session from either source is drop-in compatible.
+  //
+  // The raw `postEvent` / `onDataLinkSignal` API above stays available
+  // for consumers that need direct SDL-layer access (FRMR generation,
+  // XID negotiation, custom error-recovery flows, …).
+
+  /** The peer callsign — convenience accessor for `context.remote`. */
+  get to(): Callsign {
+    return this.context.remote;
+  }
+
+  /**
+   * Register a callback invoked when the peer delivers I-frame (or
+   * UI-frame, post-{@link DL_UNIT_DATA_indication}) info. Same shape as
+   * {@link Ax25Session.onData}.
+   */
+  onData(callback: (chunk: Uint8Array) => void): void {
+    this.onDataLinkSignal((sig) => {
+      if (sig.type === "DL_DATA_indication" || sig.type === "DL_UNIT_DATA_indication") {
+        callback(sig.data);
+      }
+    });
+  }
+
+  /**
+   * Register a callback invoked when the session enters Disconnected
+   * (either peer-initiated DISC or local DL_DISCONNECT_request that's
+   * been confirmed). Same shape as {@link Ax25Session.onDisconnected}.
+   */
+  onDisconnected(callback: () => void): void {
+    this.onDataLinkSignal((sig) => {
+      if (sig.type === "DL_DISCONNECT_indication" || sig.type === "DL_DISCONNECT_confirm") {
+        callback();
+      }
+    });
+  }
+
+  /**
+   * Queue a payload for transmission as an I-frame. Resolves once the
+   * bytes are accepted into the local TX queue (not once the peer has
+   * ack'd). Throws if the session is not Connected. Mirrors
+   * {@link Ax25Session.write}. Default PID is `0xF0` (no-layer-3).
+   */
+  async write(chunk: Uint8Array, pid: number = 0xf0): Promise<void> {
+    if (this.state !== "Connected") {
+      throw new Error(`cannot write in state ${this.state}`);
+    }
+    if (chunk.length === 0) return;
+    this.postEvent({ name: "DL_DATA_request", data: chunk, pid });
+  }
+
+  /**
+   * Initiate disconnect. Resolves on the next DL_DISCONNECT_confirm or
+   * DL_DISCONNECT_indication. If the session is already Disconnected,
+   * resolves immediately. Mirrors {@link Ax25Session.disconnect}.
+   */
+  async disconnect(): Promise<void> {
+    if (this.state === "Disconnected") return;
+    return new Promise<void>((resolve) => {
+      const cb = (sig: DataLinkSignal): void => {
+        if (sig.type === "DL_DISCONNECT_confirm" || sig.type === "DL_DISCONNECT_indication") {
+          this.offDataLinkSignal(cb);
+          resolve();
+        }
+      };
+      this.onDataLinkSignal(cb);
+      this.postEvent({ name: "DL_DISCONNECT_request" });
+    });
+  }
 }
 
 interface CachedSession {

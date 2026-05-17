@@ -418,7 +418,7 @@
     import { Terminal } from 'https://esm.sh/xterm@5.3.0';
     import { FitAddon } from 'https://esm.sh/xterm-addon-fit@0.8.0';
     import {
-      Ax25Stack,
+      Ax25Listener,
       WebSerialKissTransport,
       Callsign,
       decodeFrame,
@@ -429,7 +429,7 @@
       isResponse,
       pollFinal,
       PID_NO_LAYER_3,
-    } from 'https://esm.sh/@packet-net/ax25@0.1.0';
+    } from 'https://esm.sh/@packet-net/ax25@0.2.1';
 
     // ─── Terminal setup ────────────────────────────────────────────
     const term = new Terminal({
@@ -522,8 +522,9 @@
     // ─── State machine: command vs converse mode ───────────────────
     let mode      = 'cmd';     // 'cmd' | 'converse'
     let mycall    = null;      // Callsign | null
-    let stack     = null;      // Ax25Stack | null
-    let session   = null;      // Ax25Session | null
+    let listener  = null;      // Ax25Listener | null — accepts inbound + drives outbound
+    let session   = null;      // Ax25ListenerSession | null — current active link (either direction)
+    let sessionDir = null;     // 'in' | 'out' | null — for STATUS / display
     let buffer    = '';        // command-line buffer
     let convBuf   = '';        // converse-mode line buffer (flushed on CR)
     let echoLocal = true;
@@ -560,10 +561,6 @@
     function pad2(n) { return n.toString().padStart(2, '0'); }
     function fmtTime(d) { return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
 
-    function tryDecode(bytes) {
-      try { return decodeFrame(bytes); } catch { return null; }
-    }
-
     function fmtCallsign(c) {
       // Library callsigns toString as "BASE-SSID" or just "BASE" when
       // SSID is 0. Match BPQ's habit of keeping SSID 0 visible only
@@ -572,12 +569,10 @@
       return s.endsWith('-0') ? s.slice(0, -2) : s;
     }
 
-    function fmtFrame(direction, bytes) {
-      const f = tryDecode(bytes);
-      if (!f) {
-        return `${DIM}${fmtTime(new Date())}${RESET} ${direction === 'T' ? AMBER : PHOSPHOR}${direction}${RESET} ${RED}<undecodable ${bytes.length}B>${RESET}`;
-      }
-
+    function fmtFrame(direction, f) {
+      // `f` is a pre-decoded Ax25Frame from the listener's
+      // onFrameTraced event — no try/catch needed (the library
+      // doesn't emit the event for undecodable bytes).
       const ts   = fmtTime(new Date());
       const kind = classify(f);
       const cr   = isCommand(f) ? 'C' : (isResponse(f) ? 'R' : '?');
@@ -614,9 +609,9 @@
       return header;
     }
 
-    function logFrame(direction, bytes) {
+    function logFrame(direction, frame) {
       if (!monitor) return;
-      const line = fmtFrame(direction, bytes);
+      const line = fmtFrame(direction, frame);
       // Drop a clean newline first so the monitor trace doesn't land
       // on top of the user's in-progress cmd prompt or converse buffer.
       term.write('\r\n' + line + '\r\n');
@@ -628,30 +623,6 @@
       } else if (mode === 'converse' && convBuf.length > 0) {
         term.write(convBuf);
       }
-    }
-
-    /**
-     * Wrap an Ax25Transport so we can observe both directions. The
-     * wrap is installed once at modem-attach time; toggling monitor
-     * just flips a flag, no relink needed.
-     */
-    function wrapTransport(inner) {
-      let started = false;
-      return {
-        async start(onFrame) {
-          if (started) return;
-          started = true;
-          return inner.start((bytes) => {
-            logFrame('R', bytes);
-            onFrame(bytes);
-          });
-        },
-        async send(bytes) {
-          logFrame('T', bytes);
-          return inner.send(bytes);
-        },
-        async stop() { return inner.stop(); },
-      };
     }
 
     function prompt() {
@@ -754,6 +725,7 @@
       clear: cmdClear, cls: cmdClear,
       echo: cmdEcho,
       mon: cmdMonitor, monitor: cmdMonitor,
+      busy: cmdBusy,
       version: cmdVersion, v: cmdVersion,
     };
 
@@ -784,9 +756,10 @@
     function cmdHelp() {
       println('');
       println(`${BOLD}TNC2 commands${RESET}`, AMBER);
-      println(`  ${BOLD}MYCALL${RESET} <call>      ${DIM}set / show your callsign (e.g. M0LTE-1)${RESET}`);
+      println(`  ${BOLD}MYCALL${RESET} <call>      ${DIM}set / show your callsign (e.g. M0LTE-1) — set this before attaching${RESET}`);
       println(`  ${BOLD}CONNECT${RESET} <call>     ${DIM}or ${BOLD}C${RESET}${DIM} — open a link to a remote station${RESET}`);
       println(`  ${BOLD}DISCONNECT${RESET}         ${DIM}or ${BOLD}D${RESET}${DIM} or ${BOLD}BYE${RESET}${DIM} — drop the link${RESET}`);
+      println(`  ${BOLD}BUSY${RESET} ON|OFF        ${DIM}refuse / accept incoming calls (default OFF, accepting)${RESET}`);
       println(`  ${BOLD}STATUS${RESET}             ${DIM}show link state and frame counters${RESET}`);
       println(`  ${BOLD}ECHO${RESET} ON|OFF        ${DIM}local-echo toggle (default ON)${RESET}`);
       println(`  ${BOLD}MON${RESET} ON|OFF         ${DIM}or ${BOLD}MONITOR${RESET}${DIM} — BPQ-style frame trace${RESET}`);
@@ -795,6 +768,7 @@
       println(`  ${BOLD}HELP${RESET}               ${DIM}this list${RESET}`);
       println('');
       println(`${DIM}while connected, type a line and press ${BOLD}Enter${RESET}${DIM} to send it as one I-frame. ${BOLD}Ctrl-C${RESET}${DIM} returns to cmd mode (link stays up).${RESET}`);
+      println(`${DIM}other stations can ${BOLD}CONNECT${RESET}${DIM} to your callsign too — set MYCALL, attach the modem, and the terminal will accept incoming SABMs.${RESET}`);
       println('');
     }
 
@@ -817,12 +791,8 @@
     }
 
     async function cmdConnect(args) {
-      if (!stack) {
+      if (!listener) {
         println(`${RED}*** no modem attached. press ATTACH MODEM first.${RESET}`);
-        return;
-      }
-      if (!mycall) {
-        println(`${RED}*** MYCALL not set. type MYCALL <yourcall> first.${RESET}`);
         return;
       }
       if (session) {
@@ -837,7 +807,8 @@
       println(`${DIM}*** connecting to ${target} …${RESET}`);
       setLink('connecting');
       try {
-        session = await stack.connect({ from: mycall.toString(), to: target });
+        session = await listener.connect(target);
+        sessionDir = 'out';
         wireSession(session);
         setLink('connected', target);
         println(`${PHOSPHOR}*** CONNECTED to ${target}${RESET}`);
@@ -846,6 +817,7 @@
       } catch (e) {
         setLink('error', 'connect failed');
         session = null;
+        sessionDir = null;
         println(`${RED}*** connect failed: ${e.message}${RESET}`);
       }
     }
@@ -864,6 +836,7 @@
         println(`${RED}*** disconnect failed: ${e.message}${RESET}`);
       } finally {
         session = null;
+        sessionDir = null;
         setLink('idle');
         mode = 'cmd';
       }
@@ -873,10 +846,15 @@
       println('');
       println(`${BOLD}STATUS${RESET}`, AMBER);
       println(`  mycall : ${mycall ? mycall.toString() : '(unset)'}`);
-      println(`  modem  : ${stack ? 'attached' : 'detached'}`);
-      println(`  link   : ${session ? `CONNECTED to ${session.to.toString()}` : 'idle'}`);
+      println(`  modem  : ${listener ? 'attached' : 'detached'}`);
+      const linkStr = session
+        ? `CONNECTED ${sessionDir === 'in' ? '<' : '>'} ${session.to.toString()}`
+        : (listener ? 'listening' : 'idle');
+      println(`  link   : ${linkStr}`);
+      println(`  busy   : ${listener && !listener.acceptIncoming ? 'on (refusing incoming)' : 'off (accepting incoming)'}`);
       println(`  mode   : ${mode}`);
       println(`  echo   : ${echoLocal ? 'on' : 'off'}`);
+      println(`  monitor: ${monitor ? 'on' : 'off'}`);
       println(`  frames : tx=${frameCount.tx} rx=${frameCount.rx}`);
       println('');
     }
@@ -897,11 +875,22 @@
       println(`${DIM}MON ${monitor ? 'on' : 'off'}${RESET}`);
     }
 
+    function cmdBusy(args) {
+      if (!listener) {
+        println(`${RED}*** no modem attached.${RESET}`);
+        return;
+      }
+      const v = (args[0] ?? '').toLowerCase();
+      if (v === 'on')  { listener.acceptIncoming = false; println(`${DIM}BUSY on — refusing incoming calls (peers will see DM)${RESET}`); return; }
+      if (v === 'off') { listener.acceptIncoming = true;  println(`${DIM}BUSY off — accepting incoming calls${RESET}`); return; }
+      println(`${DIM}BUSY ${listener.acceptIncoming ? 'off' : 'on'}${RESET}`);
+    }
+
     function cmdVersion() {
       println('');
       println(`${BOLD}runtime${RESET}`, AMBER);
-      println(`  @packet-net/ax25 0.1.0`);
-      println(`  ax25sdl          0.1.0`);
+      println(`  @packet-net/ax25 0.2.1`);
+      println(`  ax25sdl          0.2.1`);
       println(`  xterm.js         5.3.0`);
       println(`  source           https://github.com/M0LTE/packet.net`);
       println('');
@@ -928,10 +917,13 @@
       s.onDisconnected(() => {
         println('');
         println(`${PHOSPHOR}*** ${s.to.toString()} DISCONNECTED${RESET}`);
-        session = null;
-        setLink('idle');
-        mode = 'cmd';
-        prompt();
+        if (s === session) {
+          session = null;
+          sessionDir = null;
+          setLink('idle');
+          mode = 'cmd';
+          prompt();
+        }
       });
     }
 
@@ -941,20 +933,56 @@
         document.getElementById('modal-noserial').classList.add('open');
         return;
       }
+      if (!mycall) {
+        println(`${RED}*** set MYCALL first — type ${BOLD}MYCALL <yourcall>${RESET}${RED} before attaching the modem.${RESET}`);
+        return;
+      }
       try {
         attachBtn.disabled = true;
         attachBtn.textContent = 'OPENING…';
         const port = await navigator.serial.requestPort();
-        const innerTransport = new WebSerialKissTransport(port, { baudRate: 57600 });
-        const transport = wrapTransport(innerTransport);
-        stack = new Ax25Stack(transport);
-        await stack.start();
-        setModem('attached', 'web serial · 57600 8N1');
+        const transport = new WebSerialKissTransport(port, { baudRate: 57600 });
+        listener = new Ax25Listener(transport, { myCall: mycall });
+
+        // Frame monitor — the library raises this event for every
+        // decoded TX/RX frame; we just format and print when monitor
+        // mode is on. Replaces the hand-rolled wrapTransport pattern
+        // earlier versions of this demo used.
+        listener.onFrameTraced(({ frame, direction }) => {
+          logFrame(direction === 'tx' ? 'T' : 'R', frame);
+        });
+
+        // Inbound calls — accept and switch to converse mode with the
+        // peer. acceptIncoming is true by default; BUSY ON flips it.
+        listener.onSessionAccepted((s) => {
+          if (session && s !== session) {
+            // We're already in a session and the listener accepted
+            // another. Single-session terminal — politely tear the
+            // new one down. (In practice this only happens if the
+            // user has BUSY OFF + multiple peers race.)
+            s.disconnect().catch(() => {});
+            return;
+          }
+          session = s;
+          sessionDir = 'in';
+          wireSession(s);
+          const peer = s.to.toString();
+          println('');
+          println(`${PHOSPHOR}*** INCOMING from ${peer}${RESET}`);
+          println(`${DIM}    [type a line + Enter to reply · Ctrl-C → cmd mode (link stays up)]${RESET}`);
+          setLink('connected', peer);
+          mode = 'converse';
+        });
+
+        await listener.start();
+        setModem('attached', `web serial · 57600 8N1 · listening as ${mycall.toString()}`);
         attachBtn.textContent = 'MODEM LIVE';
-        println(`${PHOSPHOR}*** modem attached.${RESET}`);
+        println(`${PHOSPHOR}*** modem attached — listening as ${mycall.toString()}.${RESET}`);
+        println(`${DIM}    [BUSY OFF to refuse incoming · CONNECT <call> to initiate outbound]${RESET}`);
       } catch (e) {
         attachBtn.textContent = 'ATTACH MODEM';
         attachBtn.disabled = false;
+        listener = null;
         setModem('error', 'attach failed');
         println(`${RED}*** modem attach failed: ${e.message}${RESET}`);
       }

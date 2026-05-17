@@ -4,6 +4,24 @@ All notable changes to `@packet-net/ax25` will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Subject lines stay short by convention; bodies wrap to the GitHub viewer's viewport.
 
+## [0.2.1] — 2026-05-17
+
+Lifts the friendly facade methods (`onData`, `onDisconnected`, `write`, `disconnect`, `to`) onto `Ax25ListenerSession`, so a session from `Ax25Listener.connect()` or `Ax25Listener.onSessionAccepted` is now drop-in compatible with one from `Ax25Stack.connect()`. Consumers that just want the high-level shape no longer need to write adapter code on top of `Ax25ListenerSession`'s raw `postEvent` / `onDataLinkSignal` API — the raw API stays available for advanced use. Surfaced by the packet-terminal example modernization (issue: the example would otherwise have had to reimplement what `Ax25Session` already provides).
+
+`@packet-net/ax25` and the `ax25sdl` companion package bump in lockstep to `0.2.1`. No breaking API changes — additions only.
+
+### Added
+
+- **`Ax25ListenerSession.to`** — getter for the peer callsign (convenience for `context.remote`). Same shape as `Ax25Session.to`.
+- **`Ax25ListenerSession.onData(cb)`** — register a callback invoked with the I-frame info bytes whenever a `DL_DATA_indication` (or `DL_UNIT_DATA_indication`) signal fires. Same shape as `Ax25Session.onData`.
+- **`Ax25ListenerSession.onDisconnected(cb)`** — register a callback invoked when the session enters Disconnected (either `DL_DISCONNECT_indication` or `DL_DISCONNECT_confirm`). Same shape as `Ax25Session.onDisconnected`.
+- **`Ax25ListenerSession.write(chunk, pid?)`** — queue a payload for transmission as an I-frame. Throws if not Connected; resolves once bytes are accepted to the local TX queue. Default PID `0xF0` (no-layer-3); custom PID supported (NET/ROM, IP, etc.). Same shape as `Ax25Session.write` plus the optional PID parameter.
+- **`Ax25ListenerSession.disconnect()`** — initiate disconnect; resolves on the next `DL_DISCONNECT_confirm` or `DL_DISCONNECT_indication`. Already-disconnected sessions resolve immediately. Same shape as `Ax25Session.disconnect`.
+
+### Test count
+
+- Unit tests +9 in `Ax25ListenerSessionFacade.test.ts` — coverage for each of the five facade methods plus edge cases (empty-buffer write, write-while-disconnected, custom PID, idempotent disconnect).
+
 ## [0.2.0] — 2026-05-16
 
 Adds the `Ax25Listener` class — `@packet-net/ax25` can now act as an inbound-accepting node, the single most valuable parity gap with the C# runtime. Plus two bug-fix carries from the C# runtime that were never quite right in TS either.
