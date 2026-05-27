@@ -1,9 +1,10 @@
 import {
   DataLinkAwaitingConnection,
-  DataLinkAwaitingConnection22,
+  DataLinkAwaitingV22Connection,
   DataLinkAwaitingRelease,
   DataLinkConnected,
   DataLinkDisconnected,
+  DataLinkTimerRecovery,
   type StatePage,
   type TransitionSpec,
 } from "ax25sdl";
@@ -27,25 +28,13 @@ import {
 } from "./subroutine-registry.js";
 import type { TimerName, TimerScheduler } from "./timer-scheduler.js";
 
-/**
- * SDL state name aliases. The transcribed pages use canonical names but
- * Connected's `next:` field for T1/T3 expiry refers to "TimerRecovery"
- * — a separate page our transcriptions don't have yet. For now we map
- * "TimerRecovery" back onto Connected (Connected's table contains both
- * Connected and TimerRecovery transitions in the C# runtime — the same
- * is true for our table since the figc4.4 page is the only one
- * transcribed). Document this in the README.
- */
 const STATE_PAGES: Record<string, StatePage> = {
   Disconnected: DataLinkDisconnected,
   AwaitingConnection: DataLinkAwaitingConnection,
-  AwaitingConnection22: DataLinkAwaitingConnection22,
+  AwaitingConnection22: DataLinkAwaitingV22Connection,
   AwaitingRelease: DataLinkAwaitingRelease,
   Connected: DataLinkConnected,
-  // Connected.g.ts's T1/T3 expiry routes to "TimerRecovery". We don't
-  // have a TimerRecovery state page transcribed, so we alias to
-  // Connected — pragmatic reduction documented in README.
-  TimerRecovery: DataLinkConnected,
+  TimerRecovery: DataLinkTimerRecovery,
 };
 
 /**

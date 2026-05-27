@@ -155,14 +155,17 @@ export class ActionDispatcher {
 
     switch (verb) {
       // ─── Flag mutations ────────────────────────────────────────────
-      case "set_own_receiver_busy":     ctx.ownReceiverBusy = true; return;
+      case "set_own_receiver_busy":
+      case "Set Own Receiver Busy":     ctx.ownReceiverBusy = true; return;
       case "clear_own_receiver_busy":   ctx.ownReceiverBusy = false; return;
       case "set_peer_receiver_busy":    ctx.peerReceiverBusy = true; return;
       case "clear_peer_receiver_busy":  ctx.peerReceiverBusy = false; return;
-      case "set_acknowledge_pending":   ctx.acknowledgePending = true; return;
+      case "set_acknowledge_pending":
+      case "Set Acknowledge Pending":   ctx.acknowledgePending = true; return;
       case "clear_acknowledge_pending":
       case "Clear Acknowledge Pending": ctx.acknowledgePending = false; return;
-      case "set_layer_3_initiated":     ctx.layer3Initiated = true; return;
+      case "set_layer_3_initiated":
+      case "Set Layer 3 Initiated":     ctx.layer3Initiated = true; return;
       case "clear_layer_3_initiated":
       case "Clear Layer 3 Initiated":   ctx.layer3Initiated = false; return;
 
@@ -188,24 +191,33 @@ export class ActionDispatcher {
       case "discard_frame_queue":
       case "discard_queue":
       case "discard_I_frame_queue":
-      case "Discard I Queue Entries":   ctx.iFrameQueue.length = 0; return;
+      case "Discard I Queue Entries":
+      case "Discard Queue":             ctx.iFrameQueue.length = 0; return;
       case "discard_I_frame":
       case "discard_contents_of_I_frame":
-      case "discard_primitive":         return; // no-op — incoming not stored anywhere
+      case "discard_primitive":
+      case "Discard I Frame":
+      case "Discard Contents of I Frame":
+      case "Discard Primitive":         return; // no-op — incoming not stored anywhere
 
       // ─── REJ / SREJ bookkeeping ───────────────────────────────────
-      case "set_reject_exception":      ctx.rejectException = true; return;
+      case "set_reject_exception":
+      case "Set Reject Exception":      ctx.rejectException = true; return;
       case "clear_reject_exception":
-      case "Clear Reject Condition":    ctx.rejectException = false; return;
+      case "Clear Reject Condition":
+      case "Clear Reject Exception":    ctx.rejectException = false; return;
       case "Clear Sreject Condition":
         ctx.selectiveRejectException = false;
         ctx.srejExceptionCount = 0;
         return;
       case "increment_srej_exception":
+      case "Increment Sreject Exception":
+      case "Sreject := Sreject + 1":
         ctx.srejExceptionCount++;
         ctx.selectiveRejectException = true;
         return;
       case "decrement_srej_exception_if_gt_0":
+      case "Decrement Sreject Exception if > 0":
         if (ctx.srejExceptionCount > 0) {
           ctx.srejExceptionCount--;
           if (ctx.srejExceptionCount === 0) {
@@ -231,7 +243,8 @@ export class ActionDispatcher {
 
       // ─── Modulus / version selection ──────────────────────────────
       case "set_version_2_0":           ctx.isExtended = false; return;
-      case "set_version_2_2":           ctx.isExtended = true;  return;
+      case "set_version_2_2":
+      case "Set Version 2.2":           ctx.isExtended = true;  return;
       case "Modulo <- 8":               ctx.isExtended = false; return;
       case "Modulo <- 128":             ctx.isExtended = true;  return;
       case "Set Half Duplex":           ctx.halfDuplex = true; return;
@@ -279,7 +292,7 @@ export class ActionDispatcher {
       // ─── Sequence-variable assignments ────────────────────────────
       case "V(s) := 0":                 ctx.vs = 0; return;
       case "V(s) := V(s) + 1":
-      case "V(s) <- V(s) + 1":          ctx.vs = incrementSeq(ctx, ctx.vs); return;
+      case "V(s) <- V(s) + 1":         ctx.vs = incrementSeq(ctx, ctx.vs); return;
       case "V(r) := 0":                 ctx.vr = 0; return;
       case "V(r) := V(r) + 1":          ctx.vr = incrementSeq(ctx, ctx.vr); return;
       case "V(a) := 0":                 ctx.va = 0; return;
@@ -295,18 +308,21 @@ export class ActionDispatcher {
 
       // ─── Pending-frame field assignments ──────────────────────────
       case "N(r) := V(r)":
-      case "N(r) <- V(r)":              tx.pending.nr = ctx.vr; return;
-      case "N(s) := V(s)":              tx.pending.ns = ctx.vs; return;
-      case "N(r) := N(s)":              tx.pending.nr = extractNs(tx); return;
-      case "F := 0":                    tx.pending.pfBit = false; return;
-      case "F := 1":                    tx.pending.pfBit = true;  return;
-      case "F := P":                    tx.pending.pfBit = extractPollFinal(tx); return;
-      case "p := 0":                    tx.pending.pfBit = false; return;
-      case "P <- 1":                    tx.pending.pfBit = true; return;
+      case "N(r) <- V(r)":
+      case "N(R) := V(r)":             tx.pending.nr = ctx.vr; return;
+      case "N(s) := V(s)":             tx.pending.ns = ctx.vs; return;
+      case "N(r) := N(s)":             tx.pending.nr = extractNs(tx); return;
+      case "F := 0":                   tx.pending.pfBit = false; return;
+      case "F := 1":                   tx.pending.pfBit = true;  return;
+      case "F := P":                   tx.pending.pfBit = extractPollFinal(tx); return;
+      case "p := 0":
+      case "P := 0":                   tx.pending.pfBit = false; return;
+      case "P <- 1":                   tx.pending.pfBit = true; return;
 
       // ─── Supervisory-frame transmissions ──────────────────────────
       case "RR_command":
       case "RR Command":
+      case "RR Command (P = 0)":
         tx.sendFrame(buildSFrame(tx, "RR", true)); return;
       case "RR":
       case "RR Response":
@@ -315,6 +331,8 @@ export class ActionDispatcher {
         tx.sendFrame(buildSFrame(tx, "RNR", true)); return;
       case "RNR_response":
       case "RNR Response":
+      case "RNR Response (F = 0)":
+      case "RNR":
         tx.sendFrame(buildSFrame(tx, "RNR", false)); return;
       case "REJ":
         tx.sendFrame(buildSFrame(tx, "REJ", false)); return;
@@ -332,6 +350,8 @@ export class ActionDispatcher {
         tx.sendFrame(buildUFrame(tx, "DM", false, null)); return;
       case "DM (F = 1)":
         tx.sendFrame(buildUFrame(tx, "DM", false, true)); return;
+      case "DM Response (F = 0)":
+        tx.sendFrame(buildUFrame(tx, "DM", false, false)); return;
       case "SABM":
       case "SABM (P == 1)":
         tx.sendFrame(buildUFrame(tx, "SABM", true, true)); return;
@@ -346,43 +366,76 @@ export class ActionDispatcher {
 
       // ─── UI / I-frame transmissions ───────────────────────────────
       case "UI_command":
+      case "UI Command":
         tx.sendFrame(buildUiFrame(tx, true)); return;
       case "I_command":
+      case "I Command":
         emitIFrame(tx); return;
 
       // ─── DL upper-layer signals ───────────────────────────────────
-      case "DL_CONNECT_indication":     tx.emitUpward({ type: "DL_CONNECT_indication" }); return;
-      case "DL_CONNECT_confirm":        tx.emitUpward({ type: "DL_CONNECT_confirm" }); return;
-      case "DL_DISCONNECT_indication":  tx.emitUpward({ type: "DL_DISCONNECT_indication" }); return;
-      case "DL_DISCONNECT_confirm":     tx.emitUpward({ type: "DL_DISCONNECT_confirm" }); return;
-      case "DL_DATA_indication":        tx.emitUpward(buildDataIndication(tx)); return;
+      case "DL_CONNECT_indication":
+      case "DL Connect Indication":
+      case "DL-CONNECT Indication":     tx.emitUpward({ type: "DL_CONNECT_indication" }); return;
+      case "DL_CONNECT_confirm":
+      case "DL-CONNECT Confirm":        tx.emitUpward({ type: "DL_CONNECT_confirm" }); return;
+      case "DL_DISCONNECT_indication":
+      case "DL-DISCONNECT Indication":
+      case "DL-DISCONNECT indication":  tx.emitUpward({ type: "DL_DISCONNECT_indication" }); return;
+      case "DL_DISCONNECT_confirm":
+      case "DL-DISCONNECT Confirm":     tx.emitUpward({ type: "DL_DISCONNECT_confirm" }); return;
+      case "DL_DATA_indication":
+      case "DL-DATA Indication":        tx.emitUpward(buildDataIndication(tx)); return;
       case "DL-UNIT-DATA Indication":   tx.emitUpward(buildUnitDataIndication(tx)); return;
-      case "DL_ERROR_indication_C_D":   tx.emitUpward({ type: "DL_ERROR_indication", code: "C_D" }); return;
-      case "DL_ERROR_indication_D":     tx.emitUpward({ type: "DL_ERROR_indication", code: "D" }); return;
-      case "DL_ERROR_indication_E":     tx.emitUpward({ type: "DL_ERROR_indication", code: "E" }); return;
-      case "DL_ERROR_indication_F":     tx.emitUpward({ type: "DL_ERROR_indication", code: "F" }); return;
-      case "DL_ERROR_indication_G":     tx.emitUpward({ type: "DL_ERROR_indication", code: "G" }); return;
-      case "DL_ERROR_indication_K":     tx.emitUpward({ type: "DL_ERROR_indication", code: "K" }); return;
-      case "DL_ERROR_indication_L":     tx.emitUpward({ type: "DL_ERROR_indication", code: "L" }); return;
-      case "DL_ERROR_indication_M":     tx.emitUpward({ type: "DL_ERROR_indication", code: "M" }); return;
-      case "DL_ERROR_indication_N":     tx.emitUpward({ type: "DL_ERROR_indication", code: "N" }); return;
-      case "DL_ERROR_indication_O":     tx.emitUpward({ type: "DL_ERROR_indication", code: "O" }); return;
+      case "DL_ERROR_indication_C_D":
+      case "DL-ERROR Indication (C,D)": tx.emitUpward({ type: "DL_ERROR_indication", code: "C_D" }); return;
+      case "DL_ERROR_indication_D":
+      case "DL-ERROR Indication (D)":
+      case "DL-ERROR indication (D)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "D" }); return;
+      case "DL_ERROR_indication_E":
+      case "DL-ERROR Indication (E)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "E" }); return;
+      case "DL_ERROR_indication_F":
+      case "DL-ERROR Indication (F)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "F" }); return;
+      case "DL_ERROR_indication_G":
+      case "DL-ERROR Indication (G)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "G" }); return;
+      case "DL-ERROR Indication (I)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "I" }); return;
+      case "DL_ERROR_indication_K":
+      case "DL-ERROR Indication (K)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "K" }); return;
+      case "DL_ERROR_indication_L":
+      case "DL-ERROR Indication (L)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "L" }); return;
+      case "DL_ERROR_indication_M":
+      case "DL-ERROR Indication (M)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "M" }); return;
+      case "DL_ERROR_indication_N":
+      case "DL-ERROR Indication (N)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "N" }); return;
+      case "DL_ERROR_indication_O":
+      case "DL-ERROR Indication (O)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "O" }); return;
       case "DL-ERROR Indication (A)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "A" }); return;
       case "DL-ERROR Indication (J)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "J" }); return;
-      case "DL-ERROR Indication (K)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "K" }); return;
       case "DL-ERROR Indication (Q)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "Q" }); return;
+      case "DL-ERROR Indication (T)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "T" }); return;
+      case "DL-ERROR Indication (U)":   tx.emitUpward({ type: "DL_ERROR_indication", code: "U" }); return;
       case "DL-ERROR Indication (add)": tx.emitUpward({ type: "DL_ERROR_indication", code: "add" }); return;
 
       // ─── Link-multiplexer signals (no-op in this transport model) ─
       case "LM_seize_request":
       case "LM_release_request":
-      case "LM_data_request":           return;
+      case "LM_data_request":
+      case "LM-SEIZE Request":
+      case "LM-SIEZE Request":
+      case "LM-RELEASE Request":
+      case "LM_RELEASE Request":
+      case "LM-DATA Request":           return;
 
       // ─── Internal-out signals ─────────────────────────────────────
-      case "MDL_NEGOTIATE_request":     return; // XID negotiation not implemented
+      case "MDL_NEGOTIATE_request":
+      case "MDL-NEGOTIATE Request":     return; // XID negotiation not implemented
       case "push_on_I_frame_queue":
-      case "push_frame_on_queue":       pushOnIFrameQueue(tx); return;
+      case "push_frame_on_queue":
+      case "Push on I Frame Queue":
+      case "Push on I Frame Queue (note: word order?)":
+      case "Push I Frame on I Queue":
+      case "Push Frame on Queue":       pushOnIFrameQueue(tx); return;
       case "push_old_I_frame_N_r_on_queue":
+      case "Push Old I Frame N(r) on Queue":
                                         pushOldIFrameNrOnQueue(tx); return;
       case "Push Old I Frame onto Queue":
         // figc4.7 Invoke_Retransmission body — push the I-frame whose
@@ -397,7 +450,8 @@ export class ActionDispatcher {
         return;
 
       // ─── Save / retrieve out-of-sequence I-frames ─────────────────
-      case "save_contents_of_I_frame":  saveIncomingIFrame(tx); return;
+      case "save_contents_of_I_frame":
+      case "Save Contents of I Frame":  saveIncomingIFrame(tx); return;
       case "retrieve_stored_V_r_I_frame": retrieveStoredVrIFrame(tx); return;
 
       // ─── Subroutine calls ──────────────────────────────────────────
@@ -452,12 +506,14 @@ export class ActionDispatcher {
         // don't require dynamic tuning.
         return;
       case "UI_Check":
+      case "UI Check":
         // TODO: figc4.7 UI_Check subroutine — surface incoming UI as
         // DL-UNIT-DATA. Out of scope until UI handling is wired top to
         // bottom.
         return;
       case "Check_I_Frame_Acknowledged":
-      case "Check_I_Frames_Acknowledged": {
+      case "Check_I_Frames_Acknowledged":
+      case "Check I Frame Acknowledged": {
         // Inline a reduced version of figc4.7 Check_I_Frame_Acknowledged:
         // when N(R) advances acknowledgements, update V(a), restart T1
         // if needed. Our happy-path needs are:
@@ -493,11 +549,18 @@ export class ActionDispatcher {
         return;
       }
       case "Check_Need_For_Response":
+      case "Check Need For Response":
       case "Transmit_Enquiry":
+      case "Transmit Enquiry":
+      case "Transmit Enquery":
       case "Invoke_Retransmission":
+      case "Invoke Retransmission":
       case "N_r_Error_Recovery":
+      case "N(r) Error Recovery":
+      case "N(r) Recovery":
       case "Enquiry_Response":
       case "Enquiry_Response_F_0":
+      case "Enquiry Response (F = 0)":
       case "Enquiry_Response_F_1":
       case "Set_Version_2_0":
       case "Set_Version_2_2":
