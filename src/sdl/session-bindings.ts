@@ -47,8 +47,14 @@ export function createSessionBindings(
   );
   bindings.set("layer_3_initiated", () => context.layer3Initiated);
   bindings.set("srej_enabled", () => context.srejEnabled);
+  bindings.set("SREJ_enabled", () => context.srejEnabled);
   bindings.set("version_2_2", () => context.isExtended);
   bindings.set("srej_exception_gt_0", () => context.srejExceptionCount > 0);
+  bindings.set("sreject_exception_gt_0", () => context.srejExceptionCount > 0);
+  bindings.set("ACK_pending", () => context.acknowledgePending);
+  bindings.set("ack_pending", () => context.acknowledgePending);
+  bindings.set("own_receive_busy", () => context.ownReceiverBusy);
+  bindings.set("peer_busy", () => context.peerReceiverBusy);
 
   // ─── Node policy ─────────────────────────────────────────────────────
   // "Able to establish?" — defer to station policy; default reads
@@ -63,7 +69,12 @@ export function createSessionBindings(
 
   // ─── Sequence-variable comparisons (mod-aware) ──────────────────────
   bindings.set("V_s_eq_V_a", () => context.vs === context.va);
+  bindings.set("vs_eq_va", () => context.vs === context.va);
   bindings.set("V_s_eq_V_a_plus_k", () => {
+    const m = ctxModulus(context);
+    return ((context.vs - context.va + m) % m) >= context.k;
+  });
+  bindings.set("vs_eq_va_plus_k", () => {
     const m = ctxModulus(context);
     return ((context.vs - context.va + m) % m) >= context.k;
   });
@@ -120,13 +131,29 @@ export function createSessionBindings(
   bindings.set("F_eq_1", incomingPollFinal);
   bindings.set("P_or_F_eq_1", incomingPollFinal);
   bindings.set("command", incomingCommand);
+  bindings.set("response", () => {
+    const f = getFrame();
+    return f !== null && frameIsResponse(f);
+  });
 
   bindings.set("N_s_eq_V_r", () => {
     const f = getFrame();
     if (f === null) return false;
     return getNs(f) === context.vr;
   });
+  bindings.set("ns_eq_vr", () => {
+    const f = getFrame();
+    if (f === null) return false;
+    return getNs(f) === context.vr;
+  });
   bindings.set("N_s_gt_V_r_plus_1", () => {
+    const f = getFrame();
+    if (f === null) return false;
+    const m = ctxModulus(context);
+    const diff = (getNs(f) - context.vr + m) % m;
+    return diff > 1;
+  });
+  bindings.set("ns_gt_vr_plus_1", () => {
     const f = getFrame();
     if (f === null) return false;
     const m = ctxModulus(context);
@@ -146,9 +173,15 @@ export function createSessionBindings(
   };
   bindings.set("nr_in_window", nrInWindow);
   bindings.set("V_a_le_N_r_le_V_s", nrInWindow);
+  bindings.set("va_le_nr_le_vs", nrInWindow);
 
   // `info_field_valid` — heuristic: info-field present and within ctx.n1.
   bindings.set("info_field_valid", () => {
+    const f = getFrame();
+    if (f === null) return false;
+    return f.info.length <= context.n1;
+  });
+  bindings.set("info_field_length_le_N1_and_content_is_octet_aligned", () => {
     const f = getFrame();
     if (f === null) return false;
     return f.info.length <= context.n1;
@@ -179,7 +212,15 @@ export function createSessionBindings(
     const f = getFrame();
     return f !== null && frameIsCommand(f) && pollFinal(f);
   });
+  bindings.set("command_and_P_eq_1", () => {
+    const f = getFrame();
+    return f !== null && frameIsCommand(f) && pollFinal(f);
+  });
   bindings.set("response_and_f_eq_1", () => {
+    const f = getFrame();
+    return f !== null && frameIsResponse(f) && pollFinal(f);
+  });
+  bindings.set("response_and_F_eq_1", () => {
     const f = getFrame();
     return f !== null && frameIsResponse(f) && pollFinal(f);
   });
