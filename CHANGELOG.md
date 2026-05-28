@@ -4,7 +4,9 @@ All notable changes to `@packet-net/ax25` will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Subject lines stay short by convention; bodies wrap to the GitHub viewer's viewport.
 
-## [0.3.0] — 2026-05-28
+## [0.4.0] — 2026-05-28
+
+> Note: `0.3.0` was published in error from `main` before this change merged, so it carries the old `ax25sdl ^0.6.0` dependency and **does not** include SDL loop execution. It is deprecated on npm — use `0.4.0` or later.
 
 Consumes `ax25sdl` 0.7.0, which recovers the AX.25 SDL loops the codegen had previously been dropping (ax25sdl#44/#48/#49). The session runtime now *executes* those loops instead of running each body once — the TypeScript mirror of the C# `SdlLoopExecutor` work in `m0lte/packet.net`.
 
