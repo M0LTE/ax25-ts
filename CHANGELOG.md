@@ -4,6 +4,18 @@ All notable changes to `@packet-net/ax25` will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Subject lines stay short by convention; bodies wrap to the GitHub viewer's viewport.
 
+## [0.4.1] — 2026-05-28
+
+Consumes `ax25sdl` 0.7.1, which fixes the figc4.5 Timer-Recovery recovery-complete guard (ax25sdl#53) — found on-air via packet.net#214. The decision is drawn after `V(a) := N(r)`, so it tests `V(s) = N(r)`; the table had flattened it to a pre-action guard reading the stale `V(a)`, so a poll response that acked everything (`N(r) = V(s)`) mis-routed to retransmission and recovery never completed. The canonical behavioral regression lives in the C# reference runtime (packet.net).
+
+### Changed
+
+- Bump the `ax25sdl` dependency to `^0.7.1`.
+
+### Added
+
+- Bind the `vs_eq_nr` predicate (`V(s) == N(r)`) that the 0.7.1 tables now emit on the recovery-complete paths — the same comparison as `n_r_eq_v_s`.
+
 ## [0.4.0] — 2026-05-28
 
 > Note: `0.3.0` was published in error from `main` before this change merged, so it carries the old `ax25sdl ^0.6.0` dependency and **does not** include SDL loop execution. It is deprecated on npm — use `0.4.0` or later.

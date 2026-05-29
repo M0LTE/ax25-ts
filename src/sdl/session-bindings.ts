@@ -206,6 +206,14 @@ export function createSessionBindings(
     if (f === null) return false;
     return getNr(f) === context.vs;
   });
+  // ax25sdl#53: the figc4.5 recovery-complete decision is drawn after
+  // "V(a) := N(r)", so it tests V(s) == N(r); the table emits the
+  // post-assignment guard vs_eq_nr — the same comparison as n_r_eq_v_s.
+  bindings.set("vs_eq_nr", () => {
+    const f = getFrame();
+    if (f === null) return false;
+    return context.vs === getNr(f);
+  });
   bindings.set("n_r_eq_v_a", () => {
     const f = getFrame();
     if (f === null) return false;
