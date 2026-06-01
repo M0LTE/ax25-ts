@@ -11,6 +11,10 @@ import {
   type Ax25SessionContext,
   createSessionContext,
 } from "./sdl/session-context.js";
+import {
+  type Ax25SessionQuirks,
+  defaultSessionQuirks,
+} from "./sdl/session-quirks.js";
 import { SdlSessionDriver } from "./sdl/session-driver.js";
 import { RealTimerScheduler } from "./sdl/timer-scheduler.js";
 import type { Ax25Transport } from "./transport.js";
@@ -42,6 +46,14 @@ export interface Ax25SessionOptions {
   n2?: number;
   /** PID for outbound I-frames. Default 0xF0 (no L3 protocol). */
   pid?: number;
+  /**
+   * Per-session deviations from the SDL figures where a figure is a
+   * confirmed upstream spec defect (see {@link Ax25SessionQuirks}).
+   * Defaults to the spec-correct preset; pass
+   * {@link strictlyFaithfulSessionQuirks} to run the figures exactly
+   * as drawn for conformance testing.
+   */
+  quirks?: Ax25SessionQuirks;
 }
 
 /**
@@ -97,9 +109,13 @@ export class Ax25Session {
       t3Ms: opts.t3Ms ?? 30000,
       n2: opts.n2 ?? DEFAULT_N2,
       pid: opts.pid ?? DEFAULT_PID,
+      quirks: opts.quirks ?? defaultSessionQuirks,
     };
 
     this.sessionContext = createSessionContext(from, to);
+    if (opts.quirks) {
+      this.sessionContext.quirks = { ...opts.quirks };
+    }
     this.sessionContext.n2 = this.opts.n2;
     this.sessionContext.t1vMs = this.opts.t1Ms;
     // k=1 is a documented v1 reduction: only one outstanding I-frame

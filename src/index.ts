@@ -117,5 +117,10 @@ export {
   type FrameDirection,
 } from "./listener.js";
 export type { Ax25Event } from "./sdl/events.js";
+export {
+  type Ax25SessionQuirks,
+  defaultSessionQuirks,
+  strictlyFaithfulSessionQuirks,
+} from "./sdl/session-quirks.js";
 export type { DataLinkSignal } from "./sdl/action-dispatcher.js";
 export { sabme } from "./frame.js";
