@@ -1,4 +1,8 @@
 import type { Callsign } from "../callsign.js";
+import {
+  type Ax25SessionQuirks,
+  defaultSessionQuirks,
+} from "./session-quirks.js";
 
 /**
  * Mutable per-session state for one AX.25 data-link connection. Mirrors
@@ -92,6 +96,15 @@ export interface Ax25SessionContext {
   /** T1 timeout value per §6.7.1.3, in ms. Default 6000 (= 2 * SRT). */
   t1vMs: number;
 
+  /**
+   * Named deviations from the SDL figures where a figure is a confirmed
+   * upstream spec defect (see {@link Ax25SessionQuirks}). Defaults to the
+   * spec-correct behaviour ({@link defaultSessionQuirks}); set
+   * {@link strictlyFaithfulSessionQuirks} to run the figures exactly as
+   * drawn for conformance testing.
+   */
+  quirks: Ax25SessionQuirks;
+
   // ─── Queues ─────────────────────────────────────────────────────────
 
   /** FIFO queue of I-frame payloads awaiting transmission. */
@@ -126,6 +139,7 @@ export function createSessionContext(
   return {
     local,
     remote,
+    quirks: { ...defaultSessionQuirks },
     vs: 0,
     va: 0,
     vr: 0,
