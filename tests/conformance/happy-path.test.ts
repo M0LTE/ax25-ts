@@ -139,20 +139,24 @@ describe("Phase H — happy-path conformance", () => {
     h.assertConverged();
   });
 
-  it.skip(
-    "mod-128 (extended) data transfer — connected-mode data is mod-8-only (README scope; cf. packet.net#239)",
-    () => {
-      const h = TwoStationHarness.build({ extended: true });
-      h.connect();
-      // SABM/UA connect works, but the dispatcher doesn't honour mod-128 for
-      // connected-mode I-frames (extended sequence numbers / 2-byte control are
-      // route-around in the SDL predicates — see README "Scope" table). Mirrors
-      // packet.net#239. Un-skip when extended data transfer lands.
-      h.submit(h.a, 0x01);
-      h.settle();
-      expect(h.b.delivered.map((p) => p[0])).toEqual([0x01]);
-    },
-  );
+  it("mod-128 (extended) windowed data transfer converges", () => {
+    // v2.2 arc V1 (TS parity leg of packet.net#266 /
+    // EnvelopeConformanceTests.Mod128_extended_window_transfer_converges):
+    // a full session-level mod-128 windowed transfer over the two-station
+    // harness. The harness builds both endpoints with isExtended set, so the
+    // I/S frames carry the 2-octet extended control field; the dispatcher
+    // emits 7-bit N(S)/N(R) and the receive path re-decodes at mod-128.
+    const h = TwoStationHarness.build({ extended: true, k: 8 });
+    h.connect();
+    expect(h.a.context.isExtended).toBe(true);
+    expect(h.b.context.isExtended).toBe(true);
+
+    for (let i = 0; i < 8; i++) h.submit(h.a, i);
+    h.settle();
+
+    expect(h.b.delivered.map((p) => p[0])).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    h.assertConverged();
+  });
 });
 
 describe("Phase H — oracle self-checks (known-answer)", () => {
