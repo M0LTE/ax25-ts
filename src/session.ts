@@ -202,12 +202,31 @@ export class Ax25Session {
     return p;
   }
 
-  /** @internal — called by Ax25Stack for every inbound frame matching this peer. */
-  _handleFrame(frame: Ax25Frame): void {
-    const kind = classify(frame);
+  /**
+   * @internal — called by Ax25Stack for every inbound frame matching this
+   * peer. `frame` was decoded at mod-8 for routing; `bytes` (when supplied)
+   * is the raw wire payload, re-decoded here at this session's negotiated
+   * modulo so an extended (mod-128) I/S frame's N(S)/N(R) land correctly
+   * (mirrors the listener's two-pass decode and the C# receive path).
+   */
+  _handleFrame(frame: Ax25Frame, bytes?: Uint8Array): void {
+    let f = frame;
+    if (
+      bytes !== undefined &&
+      this.sessionContext.isExtended &&
+      frame.controlExtension === null &&
+      (frame.control & 0x03) !== 0x03 // not a U frame (1 octet in both modes)
+    ) {
+      try {
+        f = decodeFrame(bytes, true);
+      } catch {
+        f = frame;
+      }
+    }
+    const kind = classify(f);
     const eventName = mapKindToEvent(kind);
     if (eventName === null) return; // unknown frame; drop
-    const event: Ax25Event = { name: eventName, frame };
+    const event: Ax25Event = { name: eventName, frame: f };
     this.driver.postEvent(event);
   }
 
@@ -426,7 +445,9 @@ export class Ax25Stack {
     const key = sessionKey(local, peer);
     const session = this.sessions.get(key);
     if (session) {
-      session._handleFrame(frame);
+      // Pass the raw bytes so the session can re-decode an extended (mod-128)
+      // I/S frame at its negotiated modulo — the routing decode above is mod-8.
+      session._handleFrame(frame, bytes);
       return;
     }
     // No matching session. We don't currently auto-accept inbound SABMs;

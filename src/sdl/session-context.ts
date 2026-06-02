@@ -11,10 +11,12 @@ import {
  * read flags / sequence variables to evaluate guards.
  *
  * Field names follow the spec's variable names (V(S), V(A), V(R), etc.)
- * verbatim. The same modulus rules apply: mod-8 uses the low 3 bits of
- * the byte values; mod-128 would use all 7. {@link IsExtended} flips
- * between the two. (mod-128 isn't wired in the TS dispatcher — see the
- * README "What's in / what's out" table.)
+ * verbatim. The same modulus rules apply: mod-8 uses the low 3 bits of the
+ * byte values; mod-128 uses all 7. {@link isExtended} flips between the two —
+ * the sequence arithmetic ({@link modulus} / {@link incrementSeq}) and the
+ * I/S frame codec are both mode-aware (v2.2 arc V1). The driver doesn't yet
+ * *negotiate* mod-128 on its own (it doesn't flip {@link isExtended} from an
+ * inbound SABME); a caller wanting an extended link sets it directly.
  */
 export interface Ax25SessionContext {
   /** Our station identity. */

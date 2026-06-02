@@ -444,6 +444,11 @@ export class Ax25Listener {
   private onInboundBytes(bytes: Uint8Array): void {
     let frame: Ax25Frame;
     try {
+      // Routing parse at mod-8 — we don't yet know which session (hence which
+      // modulo). Addresses precede the control field and are modulo-
+      // independent, so session lookup is always valid; an extended (mod-128)
+      // I/S frame's 2-octet control field is re-decoded session-side in
+      // dispatchInbound once the modulo is known.
       frame = decodeFrame(bytes);
     } catch {
       return; // malformed wire bytes — drop quietly
@@ -457,26 +462,31 @@ export class Ax25Listener {
       this.options.onHandlerError(err);
     }
     try {
-      this.dispatchInbound(frame);
+      this.dispatchInbound(frame, bytes);
     } catch (err) {
       this.options.onHandlerError(err);
     }
   }
 
-  private dispatchInbound(parsed: Ax25Frame): void {
+  private dispatchInbound(routed: Ax25Frame, bytes: Uint8Array): void {
     // Frames not addressed to us: monitor-only (trace already fired).
-    if (!parsed.destination.callsign.equals(this.myCall)) {
+    if (!routed.destination.callsign.equals(this.myCall)) {
       return;
     }
-    const peer = parsed.source.callsign;
+    const peer = routed.source.callsign;
     const peerKey = peer.toString();
-    const kind = classify(parsed);
-    const event = mapKindToEvent(parsed, kind);
-    if (event === null) return; // unknown — drop
 
     const cached = this.sessions.get(peerKey);
     if (cached) {
       this.touchLru(peer);
+      // The routing parse above was mod-8. Re-decode at the session's
+      // negotiated modulo before classifying so an extended (mod-128) I/S
+      // frame's N(S)/N(R)/PID/info land correctly (mirrors the C# listener's
+      // ReparseAtSessionModulo).
+      const parsed = reparseAtSessionModulo(routed, bytes, cached.session.context);
+      const kind = classify(parsed);
+      const event = mapKindToEvent(parsed, kind);
+      if (event === null) return; // unknown — drop
       const stateBefore: string = cached.session.state;
       const wasDisconnected = stateBefore === "Disconnected";
       const isReconnectSabm =
@@ -488,6 +498,15 @@ export class Ax25Listener {
       }
       return;
     }
+
+    // No cached session — the establishment / transient paths below deal in
+    // U-frames (SABM/SABME) or fall to the Disconnected catch-all (→ DM), all
+    // correctly decoded at mod-8: an unknown peer can't already have an
+    // extended link with us, so no second pass is needed here.
+    const parsed = routed;
+    const kind = classify(parsed);
+    const event = mapKindToEvent(parsed, kind);
+    if (event === null) return; // unknown — drop
 
     // Cache miss path. See C# DispatchInbound for the rationale block;
     // mirrored here.
@@ -647,6 +666,34 @@ export class Ax25Listener {
         this.options.onHandlerError(err);
       }
     }
+  }
+}
+
+/**
+ * Re-decode an inbound I/S frame at a known session's negotiated modulo. The
+ * inbound pump parses every frame at mod-8 for routing (the session, and thus
+ * the modulo, isn't known until the address is read) — which is always valid
+ * for the address fields but mis-reads an extended (mod-128) I/S frame's
+ * 2-octet control field. Once the session is matched, this second pass
+ * re-parses the raw bytes at the session's modulo. Returns `routed` unchanged
+ * for mod-8 links and for U frames (1 octet in both modes); re-parses only an
+ * extended link's I/S frames, falling back to `routed` if the second parse
+ * somehow fails (it can't, given the first succeeded). Mirrors the C#
+ * `Ax25Listener.ReparseAtSessionModulo`.
+ */
+function reparseAtSessionModulo(
+  routed: Ax25Frame,
+  bytes: Uint8Array,
+  ctx: Ax25SessionContext,
+): Ax25Frame {
+  if (!ctx.isExtended) return routed; // mod-8 link: the routing parse was correct
+  if (routed.controlExtension !== null) return routed; // already 2-octet (defensive)
+  const isUFrame = (routed.control & 0x03) === 0x03; // U frames are 1 octet in both modes
+  if (isUFrame) return routed;
+  try {
+    return decodeFrame(bytes, true);
+  } catch {
+    return routed;
   }
 }
 

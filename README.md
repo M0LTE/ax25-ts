@@ -102,7 +102,7 @@ To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTr
 
 ### In
 
-- Frame codec for U/S/I frames (mod-8): SABM, SABME (factory + classify only — sequence numbers are still mod-8), UA, DISC, DM, UI, RR, RNR, REJ, SREJ, I.
+- Frame codec for U/S/I frames in **both modulos**: SABM, SABME, UA, DISC, DM, UI, RR, RNR, REJ, SREJ, I. The extended (mod-128) 2-octet control field on I and S frames is wired — 7-bit N(S)/N(R) + mode-aware P/F (Fig 4.1b), with the receive path threading the session's negotiated modulo (v2.2 arc V1, parity with [`m0lte/packet.net#266`](https://github.com/m0lte/packet.net/pull/266)). U frames stay 1 octet in both modes.
 - 7-octet callsign codec with SSID + C/H + E-bit handling.
 - KISS framing (FEND/FESC/TFEND/TFESC, multi-port nibble).
 - Web Serial transport for the browser, Node TCP for KISS-over-TCP listeners (BPQ / Xrouter / direwolf / net-sim).
@@ -116,7 +116,7 @@ To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTr
 
 | Feature | Today | Tracked for |
 | --- | --- | --- |
-| mod-128 (SABME, extended sequence numbers) | SDL `version_2_2` / `mod_128` predicates return false; mod-128 branches route-around | post-v0.1 |
+| mod-128 connected-mode *negotiation* | The extended frame codec is wired (v2.2 arc V1 — encode/parse 7-bit N(S)/N(R), mode-aware P/F, receive path threads the modulo; an extended link set up with `ctx.isExtended` transfers windowed data and converges). What's left: the driver doesn't yet originate mod-128 on its own — it doesn't flip `isExtended` from an inbound SABME. | v2.2 arc V4 (cf. packet.net#239) |
 | FRMR generation / handling | Inbound FRMR silently dropped | post-v0.1 |
 | Multi-frame TX window (k>1) | Hard-coded k=1 | post-v0.1 |
 | `via` digipeater paths | `stack.connect({ via: [...] })` throws | post-v0.1 |

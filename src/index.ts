@@ -38,7 +38,10 @@
  *     [`ax25sdl`](../../../ts-spec/) — same transitions as the C# runtime
  *     reads from `src/Packet.Ax25.Sdl/*.g.cs`
  *
- *   ✗ mod-128 (SABME, extended sequence numbers)
+ *   ◐ mod-128 (extended) — the 2-octet I/S control-field *codec* is wired
+ *     (v2.2 arc V1; encode/parse 7-bit N(S)/N(R) + mode-aware P/F, receive
+ *     path threads the session modulo); connected-mode *negotiation* of
+ *     mod-128 from an inbound SABME is not yet done (lands with V4)
  *   ✓ T1 dynamic adjustment — figc4.7 `Select_T1` runs the SRT/T1V IIR
  *     (with the Karn-algorithm guard, ax25Spec41); `freezeT1V` pins T1V
  *     to a caller-supplied `t1Ms` when deterministic timing is wanted
@@ -84,6 +87,7 @@ export {
   getNs,
   iFrame,
   isCommand,
+  isExtendedControl,
   isResponse,
   pollFinal,
   requiredBytes,

@@ -175,6 +175,8 @@ function mapKindToEvent(kind: string): string | null {
       return "SREJ_received";
     case "SABM":
       return "SABM_received";
+    case "SABME":
+      return "SABME_received";
     case "DISC":
       return "DISC_received";
     case "UA":
@@ -471,8 +473,13 @@ function buildEndpoint(
   let endpoint: Endpoint;
 
   const send = (frame: Ax25Frame): void => {
-    // Round-trip through the wire codec so the real control byte is exercised.
-    const parsed = decodeFrame(encodeFrame(frame));
+    // Round-trip through the wire codec so the real control field is exercised.
+    // Parse at the link's modulo: the harness is symmetric (both endpoints
+    // share `extended`), and an I/S frame only ever flows once both sides agree
+    // on the modulo, so the sender's modulo (ctx) equals the receiver's.
+    // U frames are 1 octet in both modes regardless. Mirrors the C#
+    // TwoStationHarness.SendBytes.
+    const parsed = decodeFrame(encodeFrame(frame), ctx.isExtended);
     link.log.push(parsed);
     if (link.drop?.(parsed)) return;
     const target = peer();

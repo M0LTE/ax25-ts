@@ -12,6 +12,7 @@ import {
   rnr,
   rr,
   sabm,
+  sabme,
   srej,
   ua,
   ui,
@@ -125,9 +126,13 @@ export class UnknownActionError extends Error {
  * `Select_T1` does the SRT/T1V IIR (Karn-guarded via `ax25Spec41`) unless
  * {@link freezeT1V} pins T1V.
  *
- * One reduction relative to the C# runtime: some verbs the figures emit
- * (e.g. `set_version_2_2`, mod-128 paths) work but have limited effect
- * because the session driver doesn't honour mod-128 yet.
+ * The extended (mod-128) frame codec is wired (v2.2 arc V1, parity with
+ * packet.net#266): I/S frame emission reads `ctx.isExtended` and the sequence-
+ * number extraction is mode-aware (`getNs`/`getNr`/`pollFinal` read the frame's
+ * own control width). One reduction relative to the C# runtime remains: the
+ * driver doesn't yet *negotiate* mod-128 on its own (it doesn't flip
+ * `ctx.isExtended` from an inbound SABME), so `set_version_2_2` / the SABME
+ * emit path have limited effect until connected-mode negotiation lands (V4).
  */
 export class ActionDispatcher {
   /**
@@ -429,10 +434,16 @@ export class ActionDispatcher {
         tx.sendFrame(buildUFrame(tx, "SABM", true, true)); return;
       case "SABME":
       case "SABME (P = 1)":
-        // Mod-128 not implemented; emit a SABM as a fallback (this path
-        // is rarely hit in our happy paths since we always negotiate
-        // mod-8 / version_2_0).
-        tx.sendFrame(buildUFrame(tx, "SABM", true, true)); return;
+        // figc4.7 Establish_Data_Link's `mod_128` path (and any figure column
+        // that emits a bare SABME). Emits a real SABME U frame — its control
+        // field is 1 octet in both modulos (Fig 4.1a/4.1b), so no extended
+        // control octet. The link's subsequent I/S frames carry the 2-octet
+        // extended control field (the codec wired in v2.2 arc V1). Note the
+        // driver doesn't yet *originate* mod-128 on its own (it doesn't flip
+        // ctx.isExtended from an inbound SABME); a test wanting an extended
+        // link sets ctx.isExtended directly (as the conformance harness does),
+        // and Establish_Data_Link then takes this SABME path.
+        tx.sendFrame(buildUFrame(tx, "SABME", true, true)); return;
       case "DISC (P = 1)":
         tx.sendFrame(buildUFrame(tx, "DISC", true, true)); return;
 
@@ -521,7 +532,13 @@ export class ActionDispatcher {
         ctx.iFrameQueue.length = 0;
         ctx.rc = 1;
         tx.pending.pfBit = true;
-        tx.sendFrame(buildUFrame(tx, "SABM", true, true));
+        // figc4.7 Establish_Data_Link has two guarded paths: `mod_128` emits
+        // SABME, `not mod_128` emits SABM. Honour the session's negotiated
+        // modulo so an extended link comes up via SABME (the peer's
+        // SABME_received arm then keeps mod-128 via `Set Version 2.2`), rather
+        // than SABM (which would flip the peer back to mod-8 via
+        // `set_version_2_0`).
+        tx.sendFrame(buildUFrame(tx, ctx.isExtended ? "SABME" : "SABM", true, true));
         sched.cancel("T3");
         sched.arm("T1", ctx.t1vMs, () => this.onTimerExpiry("T1"));
         return;
@@ -665,6 +682,10 @@ function buildSFrame(
     nr,
     isCommand,
     pollFinal: pf,
+    // Emit the 2-octet extended control field when the session negotiated
+    // mod-128 (Fig 4.3b). Mirrors the C# FrameSpecExtensions passing
+    // context.IsExtended.
+    extended: ctx.isExtended,
   };
   if (type === "RR") return rr(opts);
   if (type === "RNR") return rnr(opts);
@@ -674,7 +695,7 @@ function buildSFrame(
 
 function buildUFrame(
   tx: TransitionContext,
-  type: "SABM" | "DISC" | "UA" | "DM",
+  type: "SABM" | "SABME" | "DISC" | "UA" | "DM",
   _isCommand: boolean,
   pfOverride: boolean | null,
 ): Ax25Frame {
@@ -686,6 +707,7 @@ function buildUFrame(
     digipeaters: reversedTriggerPath(tx),
   };
   if (type === "SABM") return sabm({ ...factoryOpts, pollBit: pf });
+  if (type === "SABME") return sabme({ ...factoryOpts, pollBit: pf });
   if (type === "DISC") return disc({ ...factoryOpts, pollBit: pf });
   if (type === "UA") return ua({ ...factoryOpts, finalBit: pf });
   return dm({ ...factoryOpts, finalBit: pf });
@@ -730,6 +752,7 @@ function emitIFrame(tx: TransitionContext): void {
     info: tx.event.data,
     pid: tx.event.pid,
     pollBit: pf,
+    extended: ctx.isExtended,
   });
   tx.sendFrame(frame);
   ctx.sentIFrames.set(ns, { data: tx.event.data, pid: tx.event.pid ?? 0xf0 });
@@ -792,6 +815,7 @@ function emitOldIFrame(tx: TransitionContext, ns: number): void {
       info: entry.data,
       pid: entry.pid,
       pollBit: false,
+      extended: ctx.isExtended,
     }),
   );
 }
