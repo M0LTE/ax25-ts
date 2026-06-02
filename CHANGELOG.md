@@ -4,6 +4,12 @@ All notable changes to `@packet-net/ax25` will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Subject lines stay short by convention; bodies wrap to the GitHub viewer's viewport.
 
+## [0.5.1] — 2026-06-02
+
+### Added
+
+- **`ax25Spec43DlFlowOffEntersBusy` quirk** (default-on; off under `strictlyFaithful`). figc4.4 as drawn gates DL-FLOW-OFF's Set-Own-Receiver-Busy / RNR actions on the *already-busy* (`Own Receiver Busy? = Yes`) branch, so a not-busy station receiving DL-FLOW-OFF never enters the busy condition — the primitive can't establish flow control from a clean state. The quirk inverts the `own_receiver_busy` guard for the `DL_FLOW_OFF_request` trigger only (inert elsewhere), so DL-FLOW-OFF sets own-receiver-busy and sends RNR, the peer registers peer-busy and pauses, and DL-FLOW-ON resumes the flow. Rests on §6.4.10 (entering a busy condition → RNR) and the correct FLOW-ON mirror; no de-facto corroboration (neither direwolf nor linbpq implements DL-FLOW-OFF). Mirrors packet.net libs 0.4.1 (packethacking/ax25spec#43). New `setBusy`/`clearBusy` harness controls + an RNR-flow-control conformance test (the sender pauses on the peer's RNR and resumes on its RR).
+
 ## [0.5.0] — 2026-06-02
 
 Connected-mode **data transfer and full loss recovery** now work — the headline gap since the repo split. ax25-ts reaches parity with the packet.net reference runtime for mod-8 connected-mode operation.

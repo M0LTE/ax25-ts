@@ -129,6 +129,22 @@ export interface Ax25SessionQuirks {
    * m0lte/packet.net (PR #246).
    */
   ax25Spec42SrejTargetsGap: boolean;
+
+  /**
+   * Work around `packethacking/ax25spec#43`: figc4.4 gates DL-FLOW-OFF's
+   * Set-Own-Receiver-Busy/RNR actions on the `Own Receiver Busy? = Yes`
+   * branch, so a *not-busy* station receiving DL-FLOW-OFF never enters busy —
+   * the primitive can't establish flow control from a clean state. §6.4.10
+   * (entering a busy condition → RNR) and the correct FLOW-ON mirror put the
+   * actions on the `No` (not-busy) branch. When `true` (default), the
+   * `own_receiver_busy` guard is inverted for the `DL_FLOW_OFF_request`
+   * trigger only (inert elsewhere). No de-facto corroboration (neither
+   * direwolf nor linbpq implements DL-FLOW-OFF); rests on the §6.4.10 prose +
+   * the figure contradicting its own primitive. Mirrors
+   * `Ax25SessionQuirks.Ax25Spec43DlFlowOffEntersBusy` in m0lte/packet.net ←
+   * packethacking/ax25spec#43.
+   */
+  ax25Spec43DlFlowOffEntersBusy: boolean;
 }
 
 /**
@@ -141,6 +157,7 @@ export const defaultSessionQuirks: Ax25SessionQuirks = {
   ax25Spec40DiscardOutOfWindowIFrames: true,
   ax25Spec41KarnSrtSampling: true,
   ax25Spec42SrejTargetsGap: true,
+  ax25Spec43DlFlowOffEntersBusy: true,
 };
 
 /**
@@ -154,4 +171,5 @@ export const strictlyFaithfulSessionQuirks: Ax25SessionQuirks = {
   ax25Spec40DiscardOutOfWindowIFrames: false,
   ax25Spec41KarnSrtSampling: false,
   ax25Spec42SrejTargetsGap: false,
+  ax25Spec43DlFlowOffEntersBusy: false,
 };

@@ -311,5 +311,22 @@ export function createSessionBindings(
     );
   }
 
+  // ax25spec#43: figc4.4 gates DL-FLOW-OFF's Set-Own-Receiver-Busy/RNR actions on
+  // the own_receiver_busy=Yes branch, so a not-busy station receiving DL-FLOW-OFF
+  // never enters busy — the primitive can't do its one job (§6.4.10; the FLOW-ON
+  // mirror correctly acts on its Yes/busy branch). Invert the own_receiver_busy
+  // guard for the DL_FLOW_OFF_request trigger only, so not-busy takes the action
+  // branch and already-busy no-ops. Trigger-scoped: only the FLOW-OFF decision
+  // reads own_receiver_busy during that dispatch, so it's inert elsewhere. Mirrors
+  // the ax25spec#43 block in Ax25SessionBindings.cs (m0lte/packet.net).
+  if (context.quirks.ax25Spec43DlFlowOffEntersBusy) {
+    const baseOwnReceiverBusy = bindings.get("own_receiver_busy")!;
+    bindings.set("own_receiver_busy", () =>
+      currentTrigger()?.name === "DL_FLOW_OFF_request"
+        ? !baseOwnReceiverBusy()
+        : baseOwnReceiverBusy(),
+    );
+  }
+
   return bindings;
 }

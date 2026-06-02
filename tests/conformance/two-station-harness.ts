@@ -288,6 +288,25 @@ export class TwoStationHarness {
     if (this.checkAfterEachStep) this.checkInvariants();
   }
 
+  /** Mark `e` busy (DL-FLOW-OFF) — it sends RNR and the peer must stop sending
+   * I-frames. Mirrors `TwoStationHarness.SetBusy` in packet.net. Depends on the
+   * `ax25Spec43DlFlowOffEntersBusy` quirk (default on): figc4.4 as drawn gates
+   * the busy-entering actions on the already-busy branch, so without the quirk a
+   * not-busy station never enters busy here. */
+  setBusy(e: Endpoint): void {
+    e.driver.postEvent({ name: "DL_FLOW_OFF_request" });
+    this.pumpToQuiescence();
+    if (this.checkAfterEachStep) this.checkInvariants();
+  }
+
+  /** Clear `e`'s busy condition (DL-FLOW-ON) — it sends RR and the peer may
+   * resume. Mirrors `TwoStationHarness.ClearBusy` in packet.net. */
+  clearBusy(e: Endpoint): void {
+    e.driver.postEvent({ name: "DL_FLOW_ON_request" });
+    this.pumpToQuiescence();
+    if (this.checkAfterEachStep) this.checkInvariants();
+  }
+
   /** Submit one payload at `from` for its peer; records it for the
    * reliable-delivery invariant and posts DL-DATA-request. */
   submit(from: Endpoint, ...payload: number[]): void {
