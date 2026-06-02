@@ -136,3 +136,44 @@ export {
 } from "./sdl/session-quirks.js";
 export type { DataLinkSignal } from "./sdl/action-dispatcher.js";
 export { sabme } from "./frame.js";
+export {
+  // header constants
+  XID_FORMAT_IDENTIFIER,
+  XID_GROUP_IDENTIFIER,
+  XID_HEADER_LENGTH,
+  // parameter identifiers
+  PI_CLASSES_OF_PROCEDURES,
+  PI_HDLC_OPTIONAL_FUNCTIONS,
+  PI_I_FIELD_LENGTH_TX,
+  PI_I_FIELD_LENGTH_RX,
+  PI_WINDOW_SIZE_TX,
+  PI_WINDOW_SIZE_RX,
+  PI_ACK_TIMER,
+  PI_RETRIES,
+  // Classes of Procedures
+  type ClassesOfProcedures,
+  CLASSES_OF_PROCEDURES_HALF_DUPLEX,
+  CLASSES_OF_PROCEDURES_FULL_DUPLEX,
+  classesOfProceduresToOctets,
+  classesOfProceduresFromOctets,
+  // HDLC Optional Functions
+  type RejectMode,
+  type HdlcOptionalFunctions,
+  HDLC_OPTIONAL_FUNCTIONS_DEFAULT,
+  hdlcOptionalFunctionsToOctets,
+  hdlcOptionalFunctionsFromOctets,
+  // parameter set
+  type XidParameters,
+  iFieldLengthRxOctets,
+  octetsToBits,
+  // parse options
+  type XidParseOptions,
+  XID_PARSE_STRICT,
+  XID_PARSE_LENIENT,
+  // codec
+  type XidParseResult,
+  encodeXid,
+  tryParseXid,
+  encodeUnsignedXid,
+  decodeUnsignedXid,
+} from "./xid.js";
