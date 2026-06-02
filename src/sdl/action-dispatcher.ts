@@ -12,6 +12,7 @@ import {
   rnr,
   rr,
   sabm,
+  srej,
   ua,
   ui,
 } from "../frame.js";
@@ -104,16 +105,19 @@ export class UnknownActionError extends Error {
  * {@link UnknownActionError} so transcription typos don't silently
  * disappear. This is the same shape as the C# `ActionDispatcher`.
  *
- * Two reductions relative to the C# runtime:
+ * figc4.7 subroutines route through the {@link SubroutineRegistry} walker
+ * once the driver has wired it (`Enquiry_Response`, `Select_T1`,
+ * `Invoke_Retransmission`, `Transmit_Enquiry`, `Check_I_Frame_Acknowledged`,
+ * …). A couple of high-traffic subroutines are still inlined here for the
+ * happy path (`Establish_Data_Link` synthesises SABM + start_T1;
+ * `Check_I_Frame_Acknowledged` runs a reduced ack-bookkeeping body), but the
+ * recovery subroutines run their real figc4.7 bodies through the registry —
+ * `Select_T1` does the SRT/T1V IIR (Karn-guarded via `ax25Spec41`) unless
+ * {@link freezeT1V} pins T1V.
  *
- *   1. figc4.7 subroutines route through a no-op registry — the
- *      dispatcher inlines the minimum subroutine behaviour the happy
- *      path needs (`Establish_Data_Link` synthesises SABM + start_T1;
- *      `Select_T1_Value` is a no-op; everything else is a logged stub).
- *      See README.
- *   2. Some verbs the figures emit (e.g. `set_version_2_2`, mod-128
- *      paths) work but have limited effect because the session driver
- *      doesn't honour mod-128 yet.
+ * One reduction relative to the C# runtime: some verbs the figures emit
+ * (e.g. `set_version_2_2`, mod-128 paths) work but have limited effect
+ * because the session driver doesn't honour mod-128 yet.
  */
 export class ActionDispatcher {
   /**
@@ -448,9 +452,13 @@ export class ActionDispatcher {
       case "REJ":
         tx.sendFrame(buildSFrame(tx, "REJ", false)); return;
       case "SREJ":
-        // SREJ frame factory isn't in the public API yet — fall back to
-        // REJ. Documented in README as a v1 reduction.
-        tx.sendFrame(buildSFrame(tx, "REJ", false)); return;
+        // figc4.4 out-of-sequence selective-reject + figc4.7 Enquiry_Response
+        // SREJ paths (both emit the bare, response-form `SREJ` verb — §4.3.2.4
+        // makes SREJ response-only). Emits a real SREJ supervisory frame on the
+        // wire (mod-8 control 0x0D) so the peer does single-frame selective
+        // retransmit of the requested gap. Mirrors the C# ActionDispatcher
+        // `BuildSFrame(SupervisoryFrameType.Srej, isCommand: false, …)`.
+        tx.sendFrame(buildSFrame(tx, "SREJ", false)); return;
 
       // ─── Unnumbered-frame transmissions ───────────────────────────
       case "UA":
@@ -620,11 +628,6 @@ export class ActionDispatcher {
         ctx.acknowledgePending = false;
         ctx.iFrameQueue.length = 0;
         return;
-      case "Select_T1_Value":
-        // TODO: implement RTT smoothing (figc4.7 t01–t03). For now treat
-        // as a no-op; T1V stays at its initial value. The happy paths
-        // don't require dynamic tuning.
-        return;
       case "UI_Check":
       case "UI Check":
         // TODO: figc4.7 UI_Check subroutine — surface incoming UI as
@@ -682,6 +685,10 @@ export class ActionDispatcher {
       case "Enquiry_Response_F_0":
       case "Enquiry Response (F = 0)":
       case "Enquiry_Response_F_1":
+      case "Select_T1_Value":
+      case "Select T1 Value":
+      case "Select_T1":
+      case "Select T1":
       case "Set_Version_2_0":
       case "Set_Version_2_2":
         // Route through the registry. The figc4.x state pages spell these
@@ -728,6 +735,15 @@ function normaliseSubroutineName(verb: string): string {
     case "N(r) Error Recovery":
     case "N(r) Recovery":           return "N_r_Error_Recovery";
     case "Enquiry Response (F = 0)": return "Enquiry_Response_F_0";
+    // figc4.x state pages spell the Select_T1 subroutine call as the legacy
+    // `Select_T1_Value`; figc4.7 (and ax25sdl) name the subroutine itself
+    // `Select_T1`. The registry's LEGACY_ALIASES carries the
+    // `Select_T1_Value` → `Select_T1` rewrite (and walks the canonical body),
+    // so `Select_T1_Value` resolves directly; fold the spaced spellings the
+    // dispatcher routing case-arm also accepts onto it. Mirrors the C# alias
+    // map's `Select T1` / `Select T1 Value` → `Select_T1_Value`.
+    case "Select T1 Value":         return "Select_T1_Value";
+    case "Select T1":               return "Select_T1_Value";
     default:                        return verb;
   }
 }
@@ -758,7 +774,7 @@ function reversedTriggerPath(tx: TransitionContext): Callsign[] {
 
 function buildSFrame(
   tx: TransitionContext,
-  type: "RR" | "RNR" | "REJ",
+  type: "RR" | "RNR" | "REJ" | "SREJ",
   isCommand: boolean,
 ): Ax25Frame {
   const ctx = tx.context;
@@ -774,6 +790,7 @@ function buildSFrame(
   };
   if (type === "RR") return rr(opts);
   if (type === "RNR") return rnr(opts);
+  if (type === "SREJ") return srej(opts);
   return rej(opts);
 }
 

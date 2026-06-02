@@ -12,8 +12,10 @@ import {
   isCommand,
   isResponse,
   pollFinal,
+  rej,
   rr,
   sabm,
+  srej,
   ua,
   ui,
 } from "../src/frame.js";
@@ -88,6 +90,35 @@ describe("frame codec — S frames", () => {
     const round = decodeFrame(encodeFrame(f));
     expect(classify(round)).toBe("RR");
     expect(getNr(round)).toBe(5);
+  });
+
+  it("builds SREJ with the correct N(R) and F bit, classifies distinctly from REJ", () => {
+    const f = srej({
+      destination: Callsign.parse("A"),
+      source: Callsign.parse("B"),
+      nr: 3,
+      isCommand: false,
+      pollFinal: true,
+    });
+    // SREJ control base is 0x0D — distinct from REJ's 0x09; classify must not
+    // confuse the two (the §4.3.2.4 selective reject vs §4.3.2.3 reject).
+    expect(classify(f)).toBe("SREJ");
+    expect(getNr(f)).toBe(3);
+    expect(pollFinal(f)).toBe(true);
+    const round = decodeFrame(encodeFrame(f));
+    expect(classify(round)).toBe("SREJ");
+    expect(getNr(round)).toBe(3);
+
+    // A REJ with the same N(R) must classify as REJ, not SREJ — guards the
+    // control-byte bit discrimination both ways.
+    const r = rej({
+      destination: Callsign.parse("A"),
+      source: Callsign.parse("B"),
+      nr: 3,
+      isCommand: false,
+    });
+    expect(classify(r)).toBe("REJ");
+    expect(classify(decodeFrame(encodeFrame(r)))).toBe("REJ");
   });
 });
 

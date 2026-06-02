@@ -88,6 +88,14 @@ export function createSessionBindings(
   // ─── Retry-counter comparison ──────────────────────────────────────
   bindings.set("RC_eq_N2", () => context.rc === context.n2);
   bindings.set("rc_eq_0", () => context.rc === 0);
+  // figc4.7 Select_T1's path guards are emitted with the capital spec-variable
+  // spelling `RC_eq_0`; the historic bindings use lower-case `rc_eq_0`. ax25-ts
+  // has no GuardEvaluator PredicateAliases layer (unlike packet.net), so bind
+  // the capital spelling directly — otherwise Select_T1's t01/t02/t03 guards are
+  // unbound, the subroutine walker swallows the GuardEvaluationError as
+  // "not matching", and Select_T1 silently no-ops (the SRT/T1V update never
+  // runs). Mirrors GuardEvaluator.cs PredicateAliases `RC_eq_0` → `rc_eq_0`.
+  bindings.set("RC_eq_0", () => context.rc === 0);
 
   // ─── Queue / storage state ─────────────────────────────────────────
   bindings.set("V_r_I_frame_stored", () =>
@@ -106,6 +114,11 @@ export function createSessionBindings(
   bindings.set("mod_128", () => context.isExtended);
   bindings.set("mod_8", () => !context.isExtended);
   bindings.set("t1_expired", () => context.t1HadExpired);
+  // figc4.7 Select_T1's t02/t03 guards spell this `T1_expired` (capital);
+  // bind it alongside the lower-case form for the same reason as `RC_eq_0`
+  // above. Mirrors GuardEvaluator.cs PredicateAliases `T1_expired` →
+  // `t1_expired`.
+  bindings.set("T1_expired", () => context.t1HadExpired);
   bindings.set(
     "out_of_sequence_frames_in_receive_buffer",
     () => context.storedReceivedIFrames.size > 0,
