@@ -96,6 +96,36 @@ describe("Phase H — happy-path conformance", () => {
     h.assertConverged();
   });
 
+  // ax25spec#43: figc4.4 as drawn gated DL-FLOW-OFF's Set-Own-Receiver-Busy/RNR
+  // actions on the already-busy branch, so a not-busy station could never enter
+  // busy via DL-FLOW-OFF. With `ax25Spec43DlFlowOffEntersBusy` on (default) the
+  // own_receiver_busy guard is inverted for that trigger, so DL-FLOW-OFF sets
+  // own-receiver-busy + sends RNR, the peer registers peer-busy and pauses, and
+  // DL-FLOW-ON resumes the flow. Mirrors packet.net's
+  // EnvelopeConformanceTests.Rnr_flow_control_pauses_then_resumes_the_sender.
+  it("RNR flow control pauses then resumes the sender (ax25spec#43)", () => {
+    const h = TwoStationHarness.build({ k: 4 });
+    h.connect();
+
+    h.submit(h.a, 0xa0);
+    expect(h.b.delivered.map((p) => p[0])).toEqual([0xa0]);
+
+    // B goes busy → RNR → A must register peer-busy and stop sending.
+    h.setBusy(h.b);
+    expect(h.a.context.peerReceiverBusy).toBe(true);
+
+    // While the peer is busy the second frame must NOT be delivered.
+    h.submit(h.a, 0xa1);
+    expect(h.b.delivered.map((p) => p[0])).toEqual([0xa0]);
+
+    // B clears busy → RR → A resumes and the queued frame flows.
+    h.clearBusy(h.b);
+    h.recoverUntilConverged(8);
+
+    expect(h.b.delivered.map((p) => p[0])).toEqual([0xa0, 0xa1]);
+    h.assertConverged();
+  });
+
   // ─── Pinned gaps (skipped, with issue refs) ──────────────────────────
 
   it("single I-frame A->B converges (V(s)==V(a))", () => {
