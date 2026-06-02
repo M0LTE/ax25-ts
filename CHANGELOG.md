@@ -4,7 +4,7 @@ All notable changes to `@packet-net/ax25` will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Subject lines stay short by convention; bodies wrap to the GitHub viewer's viewport.
 
-## [Unreleased]
+## [0.4.2] — 2026-06-02
 
 ### Fixed
 
