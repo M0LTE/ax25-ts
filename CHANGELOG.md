@@ -4,6 +4,24 @@ All notable changes to `@packet-net/ax25` will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Subject lines stay short by convention; bodies wrap to the GitHub viewer's viewport.
 
+## [0.5.0] — 2026-06-02
+
+Connected-mode **data transfer and full loss recovery** now work — the headline gap since the repo split. ax25-ts reaches parity with the packet.net reference runtime for mod-8 connected-mode operation.
+
+### Added
+
+- **figc4.7 subroutine walker.** The subroutine registry now table-walks `Enquiry_Response`, `Select_T1`, `Invoke_Retransmission`, `Transmit_Enquiry`, `Check_I_Frame_Acknowledged`, etc. (it was a permanent no-op). A receiver now acknowledges data — the figc4.4 delayed-ack RR flushes on `LM_SEIZE_confirm`, granted immediately for a contention-free single session — so connected-mode **data transfer converges** for the first time (closes #12).
+- **Loss recovery (REJ + SREJ).** Timeout-driven go-back-N (`Transmit_Enquiry` → `Invoke_Retransmission`) and single-frame selective reject over a real **SREJ frame on the wire** — `srej()` factory + `classify()` recognition (§4.3.2.4) (closes #10).
+- **SREJ recovery quirks** `ax25Spec40` (out-of-window discard), `ax25Spec41` (Karn SRT sampling), `ax25Spec42` (SREJ targets the gap V(R), not the just-arrived frame) — default-on, off under `strictlyFaithful` — mirroring packet.net libs 0.4.0 (packethacking/ax25spec#40/#41/#42).
+- **Dynamic T1.** `Select_T1` un-stubbed: the SRT/T1V IIR runs, Karn-guarded by `ax25Spec41` so it stays bounded.
+- **Loss-recovery conformance suite.** Drop filter + `advanceT1` + a generative single-drop / bidirectional-burst sweep across both modes, asserting convergence (windows empty + complete in-order delivery). The heavy burst livelocks only under `strictlyFaithful`, proving the quirks are load-bearing.
+
+### Fixed
+
+- The subroutine registry had no verb-alias layer, so calls spelled with spaces (`Invoke Retransmission`, `Enquiry Response (F = 0)`) silently missed the underscore-keyed registry and did nothing — no acknowledgement, no recovery.
+- The two-station conformance harness shared one timer scheduler across both stations, so one station's `Stop T1` cancelled the other's pending T1 and masked recovery — now per-station (shares only the clock, like the C# harness).
+- The LinBPQ `IFrame_RoundTrip` interop test is un-skipped — it was filed as a flake (packet.net#153) but was the data-transfer gap; it now round-trips against the live stack (closes packet.net#153).
+
 ## [0.4.2] — 2026-06-02
 
 ### Fixed
