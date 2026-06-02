@@ -39,14 +39,21 @@
  *     reads from `src/Packet.Ax25.Sdl/*.g.cs`
  *
  *   ✗ mod-128 (SABME, extended sequence numbers)
- *   ✗ T1 dynamic adjustment (the `Select_T1_Value` subroutine is stubbed)
+ *   ✓ T1 dynamic adjustment — figc4.7 `Select_T1` runs the SRT/T1V IIR
+ *     (with the Karn-algorithm guard, ax25Spec41); `freezeT1V` pins T1V
+ *     to a caller-supplied `t1Ms` when deterministic timing is wanted
  *   ✗ FRMR generation/handling
- *   ✗ Multi-frame TX windowing (k=1 hard-coded; the SDL guard
- *     `V_s_eq_V_a_plus_k` reads ctx.k so widening is a single-line change)
+ *   ✗ Multi-frame TX windowing via the public API (`Ax25SessionOptions`
+ *     exposes no `k`; the driver honours `ctx.k` and the conformance
+ *     harness drives k>1, but `stack.connect` leaves it at the default 4)
+ *   ✓ REJ + SREJ loss recovery — go-back-N (`Invoke_Retransmission`) and
+ *     single-frame selective reject over a real SREJ frame on the wire,
+ *     with the SREJ recovery quirks (ax25Spec40/41/42); see the
+ *     loss-recovery conformance suite
  *   ✗ Full figc4.7 subroutine framework (the dispatcher inlines the
- *     subset the happy path needs; the rest route through a no-op
- *     registry, which means REJ/SREJ recovery and Enquiry_Response
- *     don't have real bodies yet)
+ *     subset the happy path needs; the rest route through the registry
+ *     walker — Enquiry_Response / Select_T1 / Invoke_Retransmission /
+ *     Transmit_Enquiry now have real bodies)
  *   ✗ Digipeater paths (`via` throws "not implemented")
  *   ✗ TCP/AGW/audio transports — Web Serial only
  *   ✓ Inbound connection acceptance via `Ax25Listener` (per-peer
@@ -84,6 +91,7 @@ export {
   rnr,
   rr,
   sabm,
+  srej,
   ua,
   ui,
 } from "./frame.js";

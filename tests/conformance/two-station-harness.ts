@@ -136,6 +136,15 @@ export class Endpoint {
     readonly name: string,
     readonly context: Ax25SessionContext,
     readonly driver: SdlSessionDriver,
+    /** This station's OWN deterministic timer scheduler. Each station has its
+     * own — the two sessions' T1/T2/T3 are independent timers, exactly as in
+     * production (every {@link Ax25Session} / {@link Ax25Listener} session
+     * owns one scheduler) and in packet.net's `TwoStationHarness` (a
+     * `SystemTimerScheduler` per `BuildEndpoint`, sharing only the
+     * `FakeTimeProvider` clock). Sharing one scheduler across both stations
+     * would let one station's `Stop T1` cancel the other's pending T1 — a
+     * cross-talk that silently breaks every timeout-driven recovery. */
+    readonly scheduler: ManualScheduler,
   ) {}
 
   /** The current SDL state name. */
@@ -162,6 +171,8 @@ function mapKindToEvent(kind: string): string | null {
       return "RNR_received";
     case "REJ":
       return "REJ_received";
+    case "SREJ":
+      return "SREJ_received";
     case "SABM":
       return "SABM_received";
     case "DISC":
@@ -181,25 +192,28 @@ export class TwoStationHarness {
   readonly a: Endpoint;
   readonly b: Endpoint;
   readonly link: Link;
-  readonly scheduler: ManualScheduler;
   readonly t1Ms: number;
 
   /** When false, the drive methods skip the post-step invariant check.
    * Defaults true (oracle runs after every step). */
   checkAfterEachStep = true;
 
-  private constructor(
-    a: Endpoint,
-    b: Endpoint,
-    link: Link,
-    scheduler: ManualScheduler,
-    t1Ms: number,
-  ) {
+  private constructor(a: Endpoint, b: Endpoint, link: Link, t1Ms: number) {
     this.a = a;
     this.b = b;
     this.link = link;
-    this.scheduler = scheduler;
     this.t1Ms = t1Ms;
+  }
+
+  /**
+   * Station A's timer scheduler. Each station owns its own (see
+   * {@link Endpoint.scheduler}); this accessor exposes A's for the common
+   * "did the submitting station arm/keep T1?" assertion. Use
+   * {@link Endpoint.scheduler} directly to inspect B. The clock is advanced
+   * for BOTH stations together via {@link advanceT1}.
+   */
+  get scheduler(): ManualScheduler {
+    return this.a.scheduler;
   }
 
   /** The station that is not `e`. */
@@ -219,14 +233,19 @@ export class TwoStationHarness {
     } = opts;
     const nodeA = Callsign.parse("M0LTEA-1");
     const nodeB = Callsign.parse("M0LTEB-2");
-    const scheduler = new ManualScheduler();
     const link: Link = { log: [] };
 
+    // One scheduler PER station — the two sessions' T1/T2/T3 are independent
+    // timers. A shared scheduler would let B's `Stop T1` cancel A's pending
+    // T1 (same map key), silently breaking timeout-driven recovery. Mirrors
+    // packet.net's `TwoStationHarness` (a `SystemTimerScheduler` per endpoint,
+    // sharing only the clock); here each `ManualScheduler` is its own clock,
+    // advanced in lock-step by `advanceT1` / `recoverUntilConverged`.
     const refs: { a?: Endpoint; b?: Endpoint } = {};
     const a = buildEndpoint(
       nodeA,
       nodeB,
-      scheduler,
+      new ManualScheduler(),
       link,
       () => refs.b as Endpoint,
       { srej, k, t1Ms, n2, extended },
@@ -234,7 +253,7 @@ export class TwoStationHarness {
     const b = buildEndpoint(
       nodeB,
       nodeA,
-      scheduler,
+      new ManualScheduler(),
       link,
       () => refs.a as Endpoint,
       { srej, k, t1Ms, n2, extended },
@@ -243,7 +262,7 @@ export class TwoStationHarness {
     refs.b = b;
     a.driver.setState("Disconnected");
     b.driver.setState("Disconnected");
-    return new TwoStationHarness(a, b, link, scheduler, t1Ms);
+    return new TwoStationHarness(a, b, link, t1Ms);
   }
 
   // ─── Scenario actions ───────────────────────────────────────────────
@@ -302,9 +321,14 @@ export class TwoStationHarness {
   advanceT1(extraMs = 20): void {
     // Advance past whichever endpoint's live T1V is largest — T1V can grow
     // (figc4.7 SRT backoff), so a fixed advance could stop firing an armed T1
-    // once it grew past it, stalling recovery (and masking real bugs).
+    // once it grew past it, stalling recovery (and masking real bugs). Both
+    // stations' clocks advance together by the same amount, so a frame that
+    // crosses both stations' T1 deadlines fires recovery on each — the
+    // single-clock model packet.net's FakeTimeProvider gives, reconstructed
+    // from two lock-stepped per-station ManualSchedulers.
     const t1 = Math.max(this.a.context.t1vMs, this.b.context.t1vMs);
-    this.scheduler.advance(t1 + extraMs);
+    this.a.scheduler.advance(t1 + extraMs);
+    this.b.scheduler.advance(t1 + extraMs);
     this.pumpToQuiescence();
     if (this.checkAfterEachStep) this.checkInvariants();
   }
@@ -460,7 +484,7 @@ function buildEndpoint(
     t1Ms: opts.t1Ms,
   });
 
-  endpoint = new Endpoint(local.toString(), ctx, driver);
+  endpoint = new Endpoint(local.toString(), ctx, driver, scheduler);
   return endpoint;
 }
 

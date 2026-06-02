@@ -187,15 +187,13 @@ describe("connected-mode retransmit preserves N(s) (packet.net#231 / #8)", () =>
     };
 
     // A sends two payloads (k=4 window). Frame 0 is dropped; frame 1 arrives
-    // out of sequence at B, which rejects asking to go back to N(r)=0 (the
-    // SREJ on the wire falls back to a REJ frame — there's no SREJ factory
-    // yet — so it lands on A as REJ_received). A's figc4.7 Invoke_Retransmission
-    // now runs the go-back-N loop for real (the subroutine used to no-op
-    // because the dispatcher passed the spaced verb the registry couldn't
-    // resolve): it resends frames 0 and 1, each with its ORIGINAL N(s), B fills
-    // the gap and delivers both payloads in order. This is the timeout-free
-    // analogue of the directed go-back-N test in RecoveryRuntimeQuirks; the
-    // crux of packet.net#231 is that the resends carry their original N(s).
+    // out of sequence at B. With SREJ negotiated, B now sends a real SREJ
+    // supervisory frame on the wire (the SREJ factory landed) requesting the
+    // gap N(r)=0 — it lands on A as SREJ_received. A's figc4.4 selective
+    // retransmit (`Push Old I Frame N(r) on Queue`, via the Ax25Spec38 quirk
+    // redirect) resends frame 0 with its ORIGINAL N(s); B fills the gap,
+    // retrieves the stored frame 1, and delivers both payloads in order. The
+    // crux of packet.net#231 is that the resend carries its original N(s).
     rig.a.driver.postEvent({ name: "DL_DATA_request", data: new Uint8Array([0xa0]), pid: PID });
     rig.a.driver.postEvent({ name: "DL_DATA_request", data: new Uint8Array([0xa1]), pid: PID });
     settle(rig);
@@ -324,6 +322,8 @@ function mapKindToEvent(kind: string): string | null {
       return "RNR_received";
     case "REJ":
       return "REJ_received";
+    case "SREJ":
+      return "SREJ_received";
     case "SABM":
       return "SABM_received";
     case "DISC":

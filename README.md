@@ -102,7 +102,7 @@ To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTr
 
 ### In
 
-- Frame codec for U/S/I frames (mod-8): SABM, SABME (factory + classify only — sequence numbers are still mod-8), UA, DISC, DM, UI, RR, RNR, REJ, I.
+- Frame codec for U/S/I frames (mod-8): SABM, SABME (factory + classify only — sequence numbers are still mod-8), UA, DISC, DM, UI, RR, RNR, REJ, SREJ, I.
 - 7-octet callsign codec with SSID + C/H + E-bit handling.
 - KISS framing (FEND/FESC/TFEND/TFESC, multi-port nibble).
 - Web Serial transport for the browser, Node TCP for KISS-over-TCP listeners (BPQ / Xrouter / direwolf / net-sim).
@@ -110,20 +110,19 @@ To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTr
 - SABM → UA → Connected, DISC → UA → Disconnected, I-frame TX/RX with V(s)/V(r)/V(a) bookkeeping, T1 retry capped at N2.
 - **Inbound listener** — `Ax25Listener` accepts inbound SABM, fires `sessionAccepted`, caches per-peer sessions with LRU eviction, mirrors AX.25 §C.2 path reversal on responses.
 - **figc4.7 subroutine walker** — `Enquiry_Response` / `Select_T1` / `Check_I_Frame_Acknowledged` etc. execute their SDL paths through the dispatcher. With LM-SEIZE granted immediately (contention-free single session), the figc4.4 delayed-ack RR flushes, so connected-mode data transfer **converges** (V(s) → V(a), windows reopen).
+- **Loss recovery (REJ + SREJ)** — timeout-driven go-back-N (`Transmit_Enquiry` → `Invoke_Retransmission`) and single-frame selective reject over a **real SREJ frame on the wire**, with the SREJ recovery quirks (`ax25Spec40` window guard, `ax25Spec41` Karn SRT guard, `ax25Spec42` SREJ-targets-the-gap). The generative loss-recovery conformance suite drives single-drop and bidirectional-burst loss across both modes and asserts convergence (windows empty + complete in-order delivery).
 
 ### Out (deliberate — planned for later)
 
 | Feature | Today | Tracked for |
 | --- | --- | --- |
 | mod-128 (SABME, extended sequence numbers) | SDL `version_2_2` / `mod_128` predicates return false; mod-128 branches route-around | post-v0.1 |
-| REJ / SREJ loss-recovery convergence | The subroutine walker runs `Invoke_Retransmission` / `Transmit_Enquiry` / `N_r_Error_Recovery`, but full convergence under loss + the SREJ recovery quirks (packet.net #40 / #41 / #42) aren't ported yet | post-v0.1 (ax25-ts#10) |
 | FRMR generation / handling | Inbound FRMR silently dropped | post-v0.1 |
 | Multi-frame TX window (k>1) | Hard-coded k=1 | post-v0.1 |
 | `via` digipeater paths | `stack.connect({ via: [...] })` throws | post-v0.1 |
 | AGW client / server | Not implemented (the [`Packet.Agw`](https://github.com/m0lte/packet.net/tree/main/src/Packet.Agw) .NET package has the working reference impl) | post-v0.1 |
 | Audio modem transport (browser-side AFSK) | Not implemented | post-v0.1 |
-| XID negotiation | Not implemented — defaults used (mod-8, no SREJ) | post-v0.1 |
-| Dynamic T1 (`Select_T1_Value`) | The walker runs `Select_T1`, but the Karn's-algorithm SRT guard (packet.net#41) isn't ported, so under sustained loss SRT/T1V can grow unbounded — use `freezeT1V` (honours caller-supplied `t1Ms`) until #41 ports | post-v0.1 |
+| XID negotiation | Not implemented — defaults used (mod-8); SREJ is supported when `srejEnabled` is set on the session context | post-v0.1 |
 
 ## Browser compatibility
 

@@ -30,6 +30,7 @@ const CONTROL_UI = 0x03;
 const CONTROL_RR = 0x01;
 const CONTROL_RNR = 0x05;
 const CONTROL_REJ = 0x09;
+const CONTROL_SREJ = 0x0d;
 
 /**
  * The high-level frame kind, after classification of the control byte.
@@ -45,6 +46,7 @@ export type FrameKind =
   | "RR"
   | "RNR"
   | "REJ"
+  | "SREJ"
   | "I"
   | "UNKNOWN";
 
@@ -98,7 +100,7 @@ export function classify(frame: Ax25Frame): FrameKind {
       case 0x08:
         return "REJ";
       default:
-        return "UNKNOWN"; // SREJ — out of scope for v1.
+        return "SREJ"; // ctrl & 0x0c === 0x0c — Selective Reject (§4.3.2.4).
     }
   }
   const uBase = ctrl & 0xef;
@@ -405,6 +407,34 @@ export function rej(
   const chain = makeAddressChain(destination, source, digipeaters, opts.isCommand);
   const control =
     (((nr & 0x07) << 5) | (opts.pollFinal ? CONTROL_PF_BIT : 0) | CONTROL_REJ) &
+    0xff;
+  return {
+    ...chain,
+    control,
+    pid: null,
+    info: new Uint8Array(0),
+  };
+}
+
+/**
+ * Build a Selective REJect (SREJ) supervisory frame per §4.3.2.4. N(R) is the
+ * sequence number of the *single* I-frame being requested for retransmission
+ * (the gap). SREJ is response-only in practice (§4.3.2.4 / no deployed stack
+ * sends an SREJ command), but the factory accepts `isCommand` to mirror the
+ * RR/RNR/REJ factories and the C# `Ax25Frame.Srej`. Mod-8 control:
+ * `(N(R) << 5) | (P/F << 4) | 0x0D`.
+ */
+export function srej(
+  opts: FrameFactoryOpts & {
+    nr: number;
+    isCommand: boolean;
+    pollFinal?: boolean;
+  },
+): Ax25Frame {
+  const { destination, source, digipeaters = [], nr } = opts;
+  const chain = makeAddressChain(destination, source, digipeaters, opts.isCommand);
+  const control =
+    (((nr & 0x07) << 5) | (opts.pollFinal ? CONTROL_PF_BIT : 0) | CONTROL_SREJ) &
     0xff;
   return {
     ...chain,
