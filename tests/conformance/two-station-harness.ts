@@ -462,6 +462,28 @@ export class TwoStationHarness {
   }
 
   /**
+   * Submit a back-to-back BURST of one-byte payloads at `from` for its peer,
+   * settling only once at the end so every frame is in flight together (V(S)
+   * advances across the whole burst before any ack returns). This is the regime
+   * the per-frame {@link submit} never reaches — it pumps to quiescence after
+   * each frame, serialising the transfer — and it is what surfaces the mod-8
+   * SREJ sequence-ring-wrap bug: only when ≥ k frames fly together does N(S)
+   * wrap mid-recovery and a stale retransmit alias an already-delivered number.
+   * Each payload is recorded as its own logical submission so the convergence
+   * oracle expects one delivery per byte. Mirrors the C#
+   * `TwoStationHarness.SubmitBurst`.
+   */
+  submitBurst(from: Endpoint, ...payloads: number[]): void {
+    for (const b of payloads) {
+      const bytes = Uint8Array.from([b]);
+      from.submitted.push(bytes);
+      from.driver.postEvent({ name: "DL_DATA_request", data: bytes, pid: 0xf0 });
+    }
+    this.pumpToQuiescence();
+    if (this.checkAfterEachStep) this.checkInvariants();
+  }
+
+  /**
    * Submit one (possibly > N1) upper-layer payload through the §6.6
    * segmentation shim at `from`, carrying Layer-3 PID `pid`. Records the WHOLE
    * payload as a single logical submission (so the oracle expects one

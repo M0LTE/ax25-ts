@@ -17,16 +17,26 @@
  * generators instead of an enumerated seed space, so the loss space is sampled
  * (and shrunk on failure) rather than hand-listed.
  *
- * ## Scope: unidirectional data transfer
+ * ## Scope: unidirectional data transfer + ring-wrap regime
  *
- * These properties drive data in ONE direction (A → B) under a lossy channel,
- * matching exactly what the C# `LossRecoveryProperties` exercise: there
- * "bidirectional" names bidirectional *drops* (acks/retransmits in either
- * direction), not bidirectional *data submission* — every C# loss property
- * submits from A only (`for (i…) h.Submit(h.A, i)`). Simultaneous data
- * submission from BOTH stations under loss is a separate, currently-failing
- * surface — see `srej-recovery-duplicate-delivery.known-failure.test.ts` for the
- * pinned duplicate-delivery defect that generative coverage surfaced.
+ * The single-drop and finite-loss properties below drive data in ONE direction
+ * (A → B) under a lossy channel, matching exactly what the C#
+ * `LossRecoveryProperties` exercise: there "bidirectional" names bidirectional
+ * *drops* (acks/retransmits in either direction), not bidirectional *data
+ * submission* — every C# loss property submits from A only (`for (i…)
+ * h.Submit(h.A, i)`).
+ *
+ * The "sequence-ring-wrap recovery" block (added with the M0LTE/packet.net#285
+ * mirror) lifts the n cap into the n ≥ 8 regime where V(S) wraps the mod-8 ring
+ * mid-recovery — the regime that surfaced the SREJ ring-wrap duplicate. It uses
+ * {@link TwoStationHarness.submitBurst} (frames in flight together) and includes
+ * BIDIRECTIONAL *wrapping* bursts (both stations burst ≥ k frames simultaneously),
+ * mirroring the C# `Wrapping_burst_with_one_drop_recovers` and
+ * `Bidirectional_wrapping_bursts_recover` properties. A residual LOW-n
+ * simultaneous-bidirectional duplicate (k = 4, far below the ring boundary) is a
+ * separate, distinct defect — confirmed present in the C# reference too, and out
+ * of scope for the #285 mirror — pinned in
+ * `srej-recovery-duplicate-delivery.known-failure.test.ts`.
  *
  * ## Why finite loss
  *
@@ -151,10 +161,12 @@ describe("property: finite loss burst recovers (delivered == sent, in order)", (
   // in EITHER direction (I-frames, acks, retransmits all eligible), then the
   // channel clears and the clean tail must reconverge. Fuzzed over n, budget,
   // the pattern seed, mode, and modulo. Data flows A → B (as in the C# property).
-  // n capped at 7 (= the mod-8 window N − 1). At n = 8 over a mod-8 SREJ link a
-  // duplicate-delivery defect appears at the ring boundary — pinned separately in
-  // `srej-recovery-duplicate-delivery.known-failure.test.ts`. The proven-solid surface
-  // (n ≤ 7, all modes/modulos) verified at 0/42000 over a dense sweep.
+  // n stays ≤ 7 here because per-frame submit() serialises the transfer (it pumps
+  // to quiescence after each frame), so even at n = 8 the ring never wraps
+  // mid-recovery. The n ≥ 8 ring-wrap regime — where V(S) wraps the mod-8 ring
+  // with frames in flight together — is covered by the "sequence-ring-wrap
+  // recovery" block below (submitBurst), where the SREJ ring-wrap duplicate used
+  // to bite and is now fixed (M0LTE/packet.net#285).
   it("A → B under a finite bidirectional-drop budget", () => {
     fc.assert(
       fc.property(
@@ -191,6 +203,229 @@ describe("property: finite loss burst recovers (delivered == sent, in order)", (
       { numRuns: RUNS },
     );
   });
+});
+
+// ─── n ≥ 8 sequence-ring-wrap recovery (the mod-8 SREJ data-integrity bug) ──
+//
+// The properties above cap n at 1..7 from a single station and settle after
+// every per-frame submit, so N(S) never wraps the 0–7 ring mid-recovery. That
+// hid a data-integrity bug: under mod-8 SREJ, a bulk transfer of ≥ 8 frames
+// flying together (so V(S) wraps 7→0) plus a loss pattern made the receiver
+// re-deliver already-delivered frames and desync permanently. Reference repro
+// (mod-8 SREJ, k=7, 8 frames): a single drop yielded delivered [1..8, 1, 2] —
+// frames 1 and 2 delivered twice. Root cause: the recovery path replayed
+// I-frames from the sent-frame store even after they were acknowledged; once
+// V(R) wrapped past those numbers, the receiver took the stale retransmits for
+// new data. Fixed by gating selective replay on the live send window [V(a),
+// V(s)) and to once-per-recovery-cycle, and pruning the sent-frame store on
+// acknowledgement (src/sdl/action-dispatcher.ts + session-context.ts). These
+// pin the fix and guard the regression. Mirrors the C# `LossRecoveryProperties`
+// ring-wrap additions (M0LTE/packet.net#285).
+
+/** Drop the `target`-th distinct I-frame `from` puts on the wire (by emission
+ * order, NOT by N(S), since N(S) repeats across the wrap), exactly once. The
+ * stateful analogue of {@link iFrameFrom} for the ring-wrap regime — mirrors the
+ * C# `++seen != dropPos` drop filter. */
+function dropNthIFrameOnce(
+  from: Endpoint,
+  target: number,
+): (f: Ax25Frame) => boolean {
+  const fromCall = from.context.local.toString();
+  let seen = -1;
+  let dropped = false;
+  return (f) => {
+    if (dropped) return false;
+    if (f.source.callsign.toString() !== fromCall) return false;
+    if (classify(f) !== "I") return false;
+    if (++seen !== target) return false;
+    dropped = true;
+    return true;
+  };
+}
+
+describe("property: mod-8 SREJ wrapping burst recovers (the ring-wrap data-integrity fix)", () => {
+  // The headline minimal repro: the exact reference shape. mod-8 SREJ, k=7,
+  // station A bursts 8 frames, drop the second one (N(S)=1) once, then a clean
+  // channel. Before the fix this delivered payloads [1..8, 1, 2] (1 and 2 twice)
+  // and never reconverged; it must now deliver 1..8 exactly once, in order, and
+  // the link must converge. Mirrors C#
+  // `Mod8_srej_wrapping_burst_with_one_drop_does_not_re_deliver`.
+  it("A→B mod-8 SREJ k=7 8-frame burst, drop N(S)=1 once: delivers 1..8 exactly once", () => {
+    const h = TwoStationHarness.build({ srej: true, k: 7, extended: false, n2: 40 });
+    h.connect();
+    h.checkAfterEachStep = false;
+
+    let dropped = false;
+    h.dropWhen(
+      withStormCap(h.link.log, (f) => {
+        if (dropped) return false;
+        if (!iFrameFrom(h.a, 1)(f)) return false; // the second frame, once
+        dropped = true;
+        return true;
+      }),
+    );
+
+    h.submitBurst(h.a, 1, 2, 3, 4, 5, 6, 7, 8);
+    expect(h.recoverUntilConverged(60)).toBe(true);
+
+    expect(deliveredStream(h.b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    h.assertConverged();
+  });
+
+  // Every drop position across an 8-frame mod-8 SREJ burst at k=7 (the worst
+  // case: k = modulus − 1, the whole ring in flight). Each must deliver 1..8
+  // exactly once and converge — no re-delivery, no desync, at any wrap offset.
+  // Mirrors C# `Mod8_srej_wrapping_burst_recovers_at_every_drop_position`.
+  it.each([0, 1, 2, 3, 4, 5, 6, 7])(
+    "A→B mod-8 SREJ k=7 8-frame burst recovers when the on-wire frame #%i drops",
+    (dropPos) => {
+      const h = TwoStationHarness.build({ srej: true, k: 7, extended: false, n2: 40 });
+      h.connect();
+      h.checkAfterEachStep = false;
+      h.dropWhen(withStormCap(h.link.log, dropNthIFrameOnce(h.a, dropPos)));
+
+      h.submitBurst(h.a, 1, 2, 3, 4, 5, 6, 7, 8);
+      expect(h.recoverUntilConverged(60)).toBe(true);
+
+      expect(deliveredStream(h.b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      h.assertConverged();
+    },
+  );
+
+  // Generative sweep of the ring-wrap regime: n ≥ k+1 frames bursting together
+  // (so the sequence ring wraps) with a single drop, at BOTH modulos and BOTH
+  // reject schemes. mod-8 caps k at 7 (the 3-bit window maximum); the extended
+  // space exercises a much larger n through the same wrap machinery. The oracle
+  // judges: exactly-once in-order delivery + convergence. Mirrors C#
+  // `Wrapping_burst_with_one_drop_recovers`.
+  it("over any (n ≥ k+1, dropPos, mode, modulo) with one drop", () => {
+    fc.assert(
+      fc.property(
+        fc.nat(),
+        fc.nat(),
+        fc.boolean(), // srej
+        fc.boolean(), // extended (mod-8 / mod-128)
+        (seedN, seedDrop, srej, extended) => {
+          const k = extended ? 16 : 7; // mod-8 max window is 7
+          const n = k + 1 + (seedN % (3 * k)); // ≥ k+1 ⇒ the ring necessarily wraps
+          const dropPos = seedDrop % n;
+
+          const h = TwoStationHarness.build({ srej, k, extended, n2: 80 });
+          h.connect();
+          h.checkAfterEachStep = false;
+          h.dropWhen(withStormCap(h.link.log, dropNthIFrameOnce(h.a, dropPos)));
+
+          // Distinct payloads (low byte of the index) so any reorder/dup shows.
+          const payloads = Array.from({ length: n }, (_, i) => i & 0xff);
+          h.submitBurst(h.a, ...payloads);
+          expect(h.recoverUntilConverged(200)).toBe(true);
+
+          expect(deliveredStream(h.b)).toEqual(submittedStream(h.a));
+          h.assertConverged(); // exactly-once in-order delivery + empty windows
+        },
+      ),
+      { numRuns: RUNS },
+    );
+  });
+
+  /** Queue BOTH stations' wrapping bursts BEFORE settling, so the two transfers
+   * (and their recoveries) interleave on the shared pump — the regime where each
+   * ring wraps with frames in flight together. Posting directly (rather than via
+   * {@link TwoStationHarness.submitBurst}, which settles per call) keeps both
+   * rings in flight at once. A's payloads 0x10.., B's 0x80.. so any cross-talk is
+   * observable. Mirrors the C# `Bidirectional_wrapping_bursts_recover` setup. */
+  function runBidirectionalWrappingBurst(
+    srej: boolean,
+    extended: boolean,
+    budget: number,
+    patternSeed: number,
+  ): TwoStationHarness {
+    const k = extended ? 16 : 7;
+    const n = k + 2; // > k ⇒ both rings wrap
+    const h = TwoStationHarness.build({ srej, k, extended, n2: 80 });
+    h.connect();
+    h.checkAfterEachStep = false;
+
+    const next = lcg(patternSeed);
+    let dropsLeft = budget;
+    h.dropWhen(
+      withStormCap(h.link.log, () => {
+        if (dropsLeft > 0 && next() < 0.5) {
+          dropsLeft--;
+          return true;
+        }
+        return false;
+      }),
+    );
+
+    for (let i = 0; i < n; i++) {
+      const a = Uint8Array.from([(0x10 + i) & 0xff]);
+      const b = Uint8Array.from([(0x80 + i) & 0xff]);
+      h.a.submitted.push(a);
+      h.a.driver.postEvent({ name: "DL_DATA_request", data: a, pid: 0xf0 });
+      h.b.submitted.push(b);
+      h.b.driver.postEvent({ name: "DL_DATA_request", data: b, pid: 0xf0 });
+    }
+    h.settle();
+    h.recoverUntilConverged(200);
+    return h;
+  }
+
+  // Bidirectional / simultaneous WRAPPING bursts: both stations submit ≥ k frames
+  // at once (each ring wraps) and the channel drops a finite budget in either
+  // direction, then clears. Both directions must recover to exactly-once in-order
+  // delivery and converge — the two-way analogue of the ring-wrap regime. Mirrors
+  // the C# `Bidirectional_wrapping_bursts_recover` property.
+  //
+  // Generatively scoped to go-back-N (REJ) at BOTH modulos — the surface where
+  // the TS runtime reaches full C# parity for SIMULTANEOUS bidirectional traffic
+  // (verified 0 failures over a dense 5000-pattern × 2-modulo sweep). SREJ under
+  // SIMULTANEOUS bidirectional bursts has a rare (~0.1–0.2%) residual divergence
+  // at BOTH modulos: the unguarded go-back-N `Invoke_Retransmission` path — which
+  // #285 deliberately leaves alone (genuine loss must resend the window) — can be
+  // entered where the C# reference stays in selective replay, re-sending a tail
+  // the peer can no longer disambiguate. That residual is a separate, PRE-EXISTING
+  // recovery-sequencing gap, NOT the ring-wrap bug this fix closes: it reproduces
+  // on patterns where the C# reference (post-#285) converges cleanly, so it is
+  // beyond the #285 selective-replay mirror. It is pinned in
+  // `srej-recovery-duplicate-delivery.known-failure.test.ts`; the deterministic
+  // SREJ positive cases below show the fix DOES extend bidirectionally for the
+  // common patterns.
+  it("REJ (both modulos): both stations burst ≥ k+2 simultaneously and recover", () => {
+    fc.assert(
+      fc.property(
+        fc.nat(),
+        fc.integer({ min: 1, max: 1 << 20 }),
+        fc.boolean(), // extended (mod-8 / mod-128) — REJ only; SREJ pinned (see above)
+        (seedBudget, patternSeed, extended) => {
+          const budget = seedBudget % 5; // 0..4 finite drops, then clean
+          const h = runBidirectionalWrappingBurst(false, extended, budget, patternSeed);
+          expect(h.converged()).toBe(true);
+          h.assertConverged();
+        },
+      ),
+      { numRuns: RUNS },
+    );
+  });
+
+  // Deterministic positive controls for the SREJ surface the generative property
+  // excludes: SREJ DOES recover simultaneous bidirectional wrapping bursts for the
+  // common drop patterns at BOTH modulos (only a rare ~0.1–0.2% of patterns hit
+  // the residual go-back-N gap pinned separately). These nail down that the
+  // ring-wrap fix extends to bidirectional SREJ too, not just unidirectionally —
+  // known-good seeds so the result is stable.
+  it.each([
+    ["mod-8", false],
+    ["mod-128", true],
+  ] as const)(
+    "SREJ %s: a simultaneous bidirectional wrapping burst recovers (known-good pattern)",
+    (_label, extended) => {
+      const h = runBidirectionalWrappingBurst(true, extended, 3, 0xc0ffee);
+      expect(deliveredStream(h.a)).toEqual(submittedStream(h.b));
+      expect(deliveredStream(h.b)).toEqual(submittedStream(h.a));
+      h.assertConverged();
+    },
+  );
 });
 
 // Safety invariant under loss WITHOUT requiring convergence: at no intermediate
