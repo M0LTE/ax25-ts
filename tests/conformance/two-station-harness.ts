@@ -253,6 +253,8 @@ function mapKindToEvent(kind: string): string | null {
       return "DM_received";
     case "UI":
       return "UI_received";
+    case "FRMR":
+      return "FRMR_received";
     default:
       return null;
   }
@@ -374,6 +376,13 @@ export class TwoStationHarness {
     b.driver.setState("Disconnected");
     const harness = new TwoStationHarness(a, b, link, t1Ms);
     recorder.record = (from, id) => harness.recordTransition(from, id);
+    // The MDL (management_data_link) machine runs its own SdlSessionDriver; its
+    // Ready/Negotiating state names don't collide with the data-link states, so
+    // the same `(from, id)` ledger captures its transitions too. Forwarding the
+    // MDL driver's transition-fired hook lets the coverage ledger track the MDL
+    // machine (V5a) — mirrors the C# `a.Mdl.TransitionFired += ...` wiring.
+    a.mdl.onTransitionFired((spec) => harness.recordTransition(spec.from, spec.id));
+    b.mdl.onTransitionFired((spec) => harness.recordTransition(spec.from, spec.id));
     return harness;
   }
 
@@ -464,6 +473,28 @@ export class TwoStationHarness {
     if (this.checkAfterEachStep) this.checkInvariants();
   }
 
+  /**
+   * Advance just past the delayed-ack timer T2 (but well short of T1), so a
+   * receiver's pending RR flushes and the sender's V(a) / window catches up —
+   * without provoking a spurious T1 retransmit. Use after a burst of
+   * {@link submit} to settle a one-directional transfer's acks. The TS analogue
+   * of the C# `TwoStationHarness.FlushAcks`.
+   *
+   * In the TS contention-free model the dispatcher grants LM-SEIZE immediately,
+   * so the figc4.4 delayed-ack RR already flushes during {@link pumpToQuiescence}
+   * (an explicit T2 timer is never armed from a dispatched action — see the
+   * class docstring); this advance is therefore a pump in practice, kept faithful
+   * to the C# API (and to fire any T2 below T1V/2 should the ack model ever
+   * change). T1V/2 stays below the live T1V by construction, so no T1 fires.
+   */
+  flushAcks(): void {
+    const half = Math.max(this.a.context.t1vMs, this.b.context.t1vMs) / 2;
+    this.a.scheduler.advance(half);
+    this.b.scheduler.advance(half);
+    this.pumpToQuiescence();
+    if (this.checkAfterEachStep) this.checkInvariants();
+  }
+
   /** Disconnect from `from`; asserts both reach Disconnected. */
   disconnect(from: Endpoint): void {
     from.driver.postEvent({ name: "DL_DISCONNECT_request" });
@@ -484,6 +515,28 @@ export class TwoStationHarness {
     target.inbound.push(event);
     this.pumpToQuiescence();
     if (this.checkAfterEachStep) this.checkInvariants();
+  }
+
+  /**
+   * Inject a built frame at `target`'s receiver: round-trip it through the wire
+   * codec (`encodeFrame` → `decodeFrame` at the target's modulo, so the real
+   * control field is exercised), classify it through the same `classify` the
+   * receive path uses, and {@link inject} the resulting received-frame event.
+   * The TS analogue of the C# `TwoStationHarness.InjectFrameBytes` — it drives
+   * the full inbound codec path, so a real RR/REJ/SREJ/I/DM/SABM(E)/UI/FRMR
+   * frame (or a hand-built malformed control byte) becomes the event the
+   * dispatcher actually sees. Build the frame addressed *to* the target
+   * (`destination: target.context.local, source: target.context.remote`) so it
+   * survives the address check the receive path applies. A frame whose kind has
+   * no event mapping (or that doesn't parse) is a no-op, exactly as a stray
+   * on-the-wire frame would be. Bypasses the channel's drop/address filters: the
+   * frame is, by construction, "already at the receiver".
+   */
+  injectFrameBytes(target: Endpoint, frame: Ax25Frame): void {
+    const parsed = decodeFrame(encodeFrame(frame), target.context.isExtended);
+    const eventName = mapKindToEvent(classify(parsed));
+    if (eventName === null) return;
+    this.inject(target, { name: eventName, frame: parsed });
   }
 
   /**
