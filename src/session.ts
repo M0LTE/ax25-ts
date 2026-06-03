@@ -6,6 +6,7 @@ import {
   encodeFrame,
 } from "./frame.js";
 import type { DataLinkSignal } from "./sdl/action-dispatcher.js";
+import type { Ax25Event as Ax25EventName } from "ax25sdl";
 import type { Ax25Event } from "./sdl/events.js";
 import {
   type Ax25SessionContext,
@@ -330,7 +331,7 @@ export class Ax25Session {
  * transition tables. Returns null for frames the SDL doesn't model
  * (UI in a v1-restricted runtime, SREJ, FRMR, XID, TEST, etc.).
  */
-function mapKindToEvent(kind: string): string | null {
+function mapKindToEvent(kind: string): Ax25EventName | null {
   switch (kind) {
     case "I":
       return "I_received";

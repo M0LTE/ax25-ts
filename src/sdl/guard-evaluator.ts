@@ -1,23 +1,27 @@
+import type { Ax25Guard, GuardTerm } from "ax25sdl";
+
 /**
- * Evaluates the small boolean expression language used in SDL transition
- * `guard:` fields. Grammar:
+ * Evaluates a typed SDL guard — the `guard:` of a {@link TransitionSpec} /
+ * {@link SubroutinePath} (a `GuardTerm[]` conjunction) and a {@link LoopRange}'s
+ * single-term `predicate`.
  *
- *   expr   := term ("or" term)*
- *   term   := factor ("and" factor)*
- *   factor := "not"? identifier
+ * Each {@link GuardTerm} is a typed {@link Ax25Guard} atom plus a `negate`
+ * flag. A conjunction holds when every term holds (logical AND, applying each
+ * term's `negate`); an empty conjunction is unguarded (always `true`).
  *
- * Identifiers are resolved against an externally-supplied bindings table
- * (e.g. `"own_receiver_busy"` → a closure reading `ctx.ownReceiverBusy`).
- * Whitespace separates tokens. Parentheses are not supported — every guard
- * observed in the spec is a simple conjunction of negated or unnegated
- * flags, occasionally an `or`. The grammar grows only as new SDL pages
- * need it.
+ * Atoms are resolved against an externally-supplied bindings table keyed by the
+ * generated {@link Ax25Guard} closed set (e.g. `"own_receiver_busy"` → a closure
+ * reading `ctx.ownReceiverBusy`). Because the key type is the closed union, the
+ * binding table is exhaustive by construction — a renamed or typo'd atom is a
+ * compile error, not an unbound-identifier throw at runtime. This replaces the
+ * former string-expression parser (`expr := term ("or" term)*`, etc.) and the
+ * hand-mirrored predicate-alias reconciliation: the typed `GuardTerm[]` already
+ * carries the conjunction structure and the canonical spelling, so there is no
+ * string to tokenise and no dual-spelling to reconcile.
  *
- * Empty / null / whitespace-only expression is treated as `true` (no guard).
- *
- * Mirrors the C# `Packet.Ax25.Session.GuardEvaluator` line-for-line.
+ * Mirrors the C# `Packet.Ax25.Session.GuardEvaluator` over `GuardTerm[]`.
  */
-export type GuardBindings = ReadonlyMap<string, () => boolean>;
+export type GuardBindings = ReadonlyMap<Ax25Guard, () => boolean>;
 
 export class GuardEvaluationError extends Error {
   constructor(message: string) {
@@ -29,74 +33,27 @@ export class GuardEvaluationError extends Error {
 export class GuardEvaluator {
   constructor(private readonly bindings: GuardBindings) {}
 
-  evaluate(expression: string | null | undefined): boolean {
-    if (expression == null) return true;
-    const trimmed = expression.trim();
-    if (trimmed === "") return true;
-    const tokens = trimmed.split(/[ \t]+/).filter((t) => t.length > 0);
-    const state = { tokens, idx: 0, original: expression };
-    const result = this.parseOr(state);
-    if (state.idx !== tokens.length) {
-      throw new GuardEvaluationError(
-        `trailing tokens in guard expression '${expression}' at position ${state.idx}`,
-      );
+  /**
+   * Evaluate a guard conjunction. Empty / null / undefined is unguarded
+   * (`true`); otherwise every term must hold.
+   */
+  evaluate(guard: readonly GuardTerm[] | null | undefined): boolean {
+    if (guard == null) return true;
+    for (const term of guard) {
+      if (!this.evaluateTerm(term)) return false;
     }
-    return result;
+    return true;
   }
 
-  private parseOr(state: ParseState): boolean {
-    let result = this.parseAnd(state);
-    while (state.idx < state.tokens.length && state.tokens[state.idx] === "or") {
-      state.idx++;
-      const right = this.parseAnd(state);
-      result = result || right;
-    }
-    return result;
-  }
-
-  private parseAnd(state: ParseState): boolean {
-    let result = this.parseFactor(state);
-    while (
-      state.idx < state.tokens.length &&
-      state.tokens[state.idx] === "and"
-    ) {
-      state.idx++;
-      const right = this.parseFactor(state);
-      result = result && right;
-    }
-    return result;
-  }
-
-  private parseFactor(state: ParseState): boolean {
-    if (state.idx >= state.tokens.length) {
-      throw new GuardEvaluationError(
-        `expected identifier in '${state.original}' at position ${state.idx}`,
-      );
-    }
-    let negate = false;
-    if (state.tokens[state.idx] === "not") {
-      negate = true;
-      state.idx++;
-      if (state.idx >= state.tokens.length) {
-        throw new GuardEvaluationError(
-          `expected identifier after 'not' in '${state.original}'`,
-        );
-      }
-    }
-    const ident = state.tokens[state.idx++]!;
-    const pred = this.bindings.get(ident);
+  /** Evaluate a single term: resolve its atom, then apply `negate`. */
+  evaluateTerm(term: GuardTerm): boolean {
+    const pred = this.bindings.get(term.atom);
     if (!pred) {
       throw new GuardEvaluationError(
-        `unbound identifier '${ident}' in '${state.original}' — add a binding before evaluating this guard`,
+        `unbound guard atom '${term.atom}' — add a binding before evaluating this guard`,
       );
     }
     const value = pred();
-    return negate ? !value : value;
+    return term.negate ? !value : value;
   }
-}
-
-interface ParseState {
-  readonly tokens: readonly string[];
-  idx: number;
-  readonly original: string;
 }

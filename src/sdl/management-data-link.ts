@@ -1,3 +1,4 @@
+import type { Ax25Guard } from "ax25sdl";
 import { type Ax25Frame, xid as buildXid } from "../frame.js";
 import {
   CLASSES_OF_PROCEDURES_FULL_DUPLEX,
@@ -129,7 +130,7 @@ export class Ax25ManagementDataLink {
     // the standard binding table (createSessionBindings), reading the MDL
     // machine's current trigger frame. Mirrors C#'s RC_eq_NM201 added over the
     // default bindings.
-    const extraBindings = new Map<string, () => boolean>([
+    const extraBindings = new Map<Ax25Guard, () => boolean>([
       ["RC_eq_NM201", () => this.mdlContext.rc === this.mdlContext.n2],
     ]);
 
