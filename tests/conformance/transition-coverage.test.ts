@@ -439,17 +439,12 @@ function runBatteryAndCollectFired(): FiredQuery {
     if (h.a.state === "AwaitingConnection") {
       h.injectFrameBytes(h.a, dmTo(h.a, false)); // DM F=0 → stay
       h.injectFrameBytes(h.a, discTo(h.a)); // DISC → stay
-      // NOTE: the C# case-12 mirror posts a DL_DATA_request here (figc4.3 t09 —
-      // buffer-while-connecting). That path currently THROWS in the TS runtime
-      // because `SdlSessionDriver.canTransmitIFrame()` is missing the C#
-      // `CanTransmitIFrame` state gate (`CurrentState is not ("Connected" or
-      // "TimerRecovery") → false`): without it the post-dispatch drain pops the
-      // just-buffered frame in AwaitingConnection and routes
-      // `I_frame_pops_off_queue` into the `push_frame_on_queue` verb, which has
-      // no DL_DATA_request trigger to read and throws. A real, pre-existing TS↔C#
-      // parity divergence (NOT in the mod-128 recovery path) — flagged for Tom,
-      // intentionally left untouched here (test-only scope). The DL-DATA buffer
-      // step (t09) is therefore omitted; the rest of the column stands.
+      // figc4.3 t09 — buffer-while-connecting: a DL_DATA_request in
+      // AwaitingConnection buffers the frame on the I-frame queue rather than
+      // sending it (the canTransmitIFrame state gate stops the post-dispatch
+      // drain from popping it pre-connect; it would drain once Connected). This
+      // used to throw before the gate — the TS↔C# parity fix mirroring packet.net#263.
+      h.a.driver.postEvent({ name: "DL_DATA_request", data: new Uint8Array([0x42]), pid: 0xf0 });
       h.advanceT1(); // T1 → retransmit SABM
       h.injectFrameBytes(h.a, dmTo(h.a, true)); // DM F=1 → Disconnected
     }
