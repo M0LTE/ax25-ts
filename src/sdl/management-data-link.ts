@@ -13,7 +13,11 @@ import {
   type Ax25SessionContext,
   createSessionContext,
 } from "./session-context.js";
-import { MDL_STATE_PAGES, SdlSessionDriver } from "./session-driver.js";
+import {
+  MDL_STATE_PAGES,
+  SdlSessionDriver,
+  type TransitionFiredHook,
+} from "./session-driver.js";
 import type { TimerScheduler } from "./timer-scheduler.js";
 import {
   applyNegotiated,
@@ -63,6 +67,15 @@ export class Ax25ManagementDataLink {
   private readonly explicitOffer: XidParameters | undefined;
   private readonly sendFrame: (frame: Ax25Frame) => void;
   private readonly mdlSignalListeners: Array<(signal: MdlSignal) => void> = [];
+
+  /**
+   * Subscribers to the MDL machine's transition-fired observability hook —
+   * each is invoked verbatim with the matched {@link TransitionSpec} of the
+   * underlying `management_data_link` (Ready/Negotiating) session, the same
+   * contract as a data-link {@link SdlSessionDriver}'s `onTransitionFired`. A
+   * pure coverage/tracing hook (no MDL behaviour). See {@link onTransitionFired}.
+   */
+  private readonly transitionFiredListeners: TransitionFiredHook[] = [];
 
   /**
    * Our XID offer — an explicit set if one was supplied at construction, else
@@ -137,6 +150,15 @@ export class Ax25ManagementDataLink {
         // Unmatched events are SDL no-ops (e.g. an XID response in Ready that
         // isn't error-B-shaped, a FRMR in Ready) — never a throw.
         onUnhandledEvent: () => {},
+        // Forward the underlying management_data_link machine's transition-fired
+        // observability event verbatim so coverage instrumentation can see the
+        // MDL's Ready/Negotiating transitions (the harness subscribes via
+        // onTransitionFired; see TwoStationHarness / the transition-coverage
+        // ledger). A pure observability hook — no MDL behaviour. Mirrors the C#
+        // Ax25ManagementDataLink.TransitionFired one-line forward.
+        onTransitionFired: (spec, state) => {
+          for (const cb of this.transitionFiredListeners) cb(spec, state);
+        },
         extraBindings,
         mdl: {
           // XID_command (signal_lower): build + send our XID command frame.
@@ -192,6 +214,24 @@ export class Ax25ManagementDataLink {
    */
   onMdlSignal(callback: (signal: MdlSignal) => void): void {
     this.mdlSignalListeners.push(callback);
+  }
+
+  /**
+   * Register a callback fired after a transition of the underlying
+   * `management_data_link` (Ready/Negotiating) machine commits — forwarded
+   * verbatim from the internal {@link SdlSessionDriver}'s `onTransitionFired`
+   * hook (its `spec.from` is `Ready`/`Negotiating`, `spec.id` the codegen
+   * transition id). The same contract as a data-link driver's
+   * `onTransitionFired`: a pure observability hook (transition-coverage
+   * instrumentation, tracing) that adds no MDL behaviour. The TS analogue of the
+   * C# `Ax25ManagementDataLink.TransitionFired` event. Lets the conformance
+   * harness fold the MDL machine's transitions onto the same behavioural
+   * transition-coverage ledger as the data-link states (the Ready/Negotiating
+   * state names don't collide with the data-link state names). Subscribers run
+   * synchronously on the posting path; keep handlers fast and non-throwing.
+   */
+  onTransitionFired(callback: TransitionFiredHook): void {
+    this.transitionFiredListeners.push(callback);
   }
 
   /**
