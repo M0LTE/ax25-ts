@@ -9,18 +9,21 @@
  * coverage is measurable and can't silently regress.
  *
  * The TypeScript parity leg of packet.net's `TransitionCoverageTests`
- * (v2.2 arc V5a — m0lte/packet.net#274). Of the 250 tracked transitions (the
- * six data-link states plus the management_data_link Ready/Negotiating machine,
- * added to the ledger in V5a via the MDL driver's forwarded transition-fired
- * hook), this measures which the real runtime runs when driven through realistic
- * traffic. The battery runs both mod-8 and mod-128 (extended) scenarios —
- * bidirectional data incl. a 127→0 window-wrap, REJ/SREJ loss recovery, RNR
- * flow, T3 keepalive, the TimerRecovery receive columns by frame-injection, XID
- * negotiation, and segmentation over a mod-128 link. The miss-list (logged) maps
- * where behavioural coverage still has gaps — most remaining misses are
- * genuinely unreachable end-to-end (the never-produced error inputs, the
- * N(R)-out-of-window collision/re-establish branches, the responder-never-parks-
- * here AwaitingV22Connection branches), the rest future scenario work.
+ * (v2.2 arc V5a — m0lte/packet.net#274; lifted in V5b to full reachable
+ * coverage). Of the 250 tracked transitions (the six data-link states plus the
+ * management_data_link Ready/Negotiating machine, added to the ledger in V5a via
+ * the MDL driver's forwarded transition-fired hook), this measures which the real
+ * runtime runs when driven through realistic traffic. The battery runs both mod-8
+ * and mod-128 (extended) scenarios — bidirectional data incl. a 127→0
+ * window-wrap, REJ/SREJ loss recovery, RNR flow, T3 keepalive, the Connected and
+ * TimerRecovery receive columns by frame-injection, the establishment/release
+ * receive + primitive + error-input columns, XID negotiation, and segmentation
+ * over a mod-128 link. As of V5b the battery drives every REACHABLE transition
+ * (238/250); the 12 remaining misses are genuinely unreachable through the real
+ * runtime — the canTransmitIFrame-gated I-frame-pop variants (packet.net#263),
+ * the command-only I-frame's nonexistent I-response columns, and the
+ * !T1_running-in-TimerRecovery flow-on branch. They are enumerated at the
+ * coverage assertion below.
  *
  * This complements the structural smoke coverage (`sdl-driver.test.ts`) and the
  * scenario suites (happy-path / loss-recovery / mod128 / mdl / segmentation),
@@ -922,11 +925,281 @@ function runBatteryAndCollectFired(): FiredQuery {
     collect(h);
   }
 
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // v2.2 arc V5b — reachable-coverage lift. The blocks below drive the
+  // remaining reachable-but-undriven receive/primitive columns across every
+  // data-link state, each in its own isolated rig so a transition's guard
+  // combination is hit exactly. Logical transition ids are mode-independent;
+  // the version_2_2 branches are selected by the rig's mod-8 / mod-128 mode.
+  // Mirrors the C# TransitionCoverageTests lift (parity leg). The genuinely
+  // unreachable residue is documented at the assertion below.
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // Build a command frame (RR command) addressed to `t`, for the figc4.1 / figc4.8
+  // catch-all columns whose event the production receive path reclassifies a
+  // non-handled command into (all_other_commands / i_or_s_command_received). The
+  // event carries the frame so the column's `F := P` reads its poll bit, exactly
+  // as the listener's reclassification delivers it. Extended off — a U/S control
+  // octet is mode-independent for these catch-alls.
+  const cmdFrameTo = (t: Endpoint): Ax25Frame =>
+    rr({ destination: t.context.local, source: t.context.remote, nr: 0, isCommand: true, pollFinal: true });
+  const cmdFrameNoPollTo = (t: Endpoint): Ax25Frame =>
+    rr({ destination: t.context.local, source: t.context.remote, nr: 0, isCommand: true, pollFinal: false });
+
+  // Local TimerRecovery builders for this lift: drive A into recovery with N
+  // unacked I-frames at mod-128 / mod-8 (drop A's I-frames, expire T1), or park
+  // it IDLE in recovery via a T3-poll whose reply is dropped (V(s)=V(a)).
+  const inTR128 = (outstanding: number, srejEnabled = false): TwoStationHarness => {
+    const h = New({ extended: true, srej: srejEnabled, k: 8, n2: 40 });
+    h.connect();
+    h.dropWhen((f) => fromA(h, f) && isI(f));
+    for (let i = 0; i < outstanding; i++) h.submit(h.a, i);
+    h.advanceT1();
+    h.dropWhen(undefined);
+    return h;
+  };
+  const inTR8 = (outstanding: number, srejEnabled = false): TwoStationHarness => {
+    const h = New({ srej: srejEnabled, k: 4, n2: 40 });
+    h.connect();
+    h.dropWhen((f) => fromA(h, f) && isI(f));
+    for (let i = 0; i < outstanding; i++) h.submit(h.a, i);
+    h.advanceT1();
+    h.dropWhen(undefined);
+    return h;
+  };
+  const idleTR128srej = (): TwoStationHarness => {
+    const h = New({ extended: true, srej: true, k: 8 });
+    h.connect();
+    h.dropWhen((f) => fromB(h, f) && isSupervisoryAck(f));
+    h.inject(h.a, { name: "T3_expiry" });
+    h.dropWhen(undefined);
+    return h;
+  };
+
+
+  // 29. Disconnected receive/primitive column (figc4.1) — the columns the §11
+  // "no session up" rig (case 11) leaves undriven. DL-DISCONNECT/DL-UNIT-DATA
+  // requests, the upper-layer + lower-layer catch-alls, the reclassified
+  // all_other_commands catch-all (→ DM), a UI with P=1 (DM F=1), and — with the
+  // station configured to refuse — the !able_to_establish SABM/SABME branches
+  // (→ DM rather than accept).
+  { const h = New(); h.a.driver.postEvent({ name: "DL_DISCONNECT_request" }); h.settle(); collect(h); } // t01
+  { const h = New(); h.a.driver.postEvent({ name: "DL_UNIT_DATA_request", data: Uint8Array.from([0x01]) }); h.settle(); collect(h); } // t02
+  { const h = New(); h.a.driver.postEvent({ name: "all_other_primitives__from_upper_layer" }); h.settle(); collect(h); } // t04
+  { const h = New(); h.inject(h.a, { name: "all_other_commands", frame: cmdFrameTo(h.a) }); collect(h); } // t05
+  { const h = New(); h.inject(h.a, { name: "all_other_primitives__from_lower_layer" }); collect(h); } // t06
+  { const h = New(); h.injectFrameBytes(h.a, uiTo(h.a, "P", true)); collect(h); } // t11_ui_received_yes
+  { const h = New(); h.a.context.acceptIncoming = false; h.injectFrameBytes(h.a, sabmTo(h.a)); collect(h); } // t13_sabm_received_no
+  { const h = New({ extended: true }); h.a.context.acceptIncoming = false; h.injectFrameBytes(h.a, sabmeTo(h.a)); collect(h); } // t14_sabme_received_no
+
+  // 30. AwaitingConnection receive/primitive column (figc4.3) — hold A there by
+  // dropping B's UA, then walk the columns case 12 leaves undriven: redundant
+  // DL-CONNECT (t07), DL-UNIT-DATA (t08), a not-layer-3-initiated DL-DATA
+  // (t09_no), the upper-layer catch-all (t11), a lower-layer catch-all (t06), a
+  // UA with F=0 (t04_no → DL-ERROR D), UI P=1/P=0 (t12), an incoming SABM (t16 →
+  // UA, collision) and SABME (t17 → DM, routes to figc4.6), plus a redundant
+  // DL-DISCONNECT (t01).
+  const intoAwaitingConnection = (): TwoStationHarness => {
+    const h = New();
+    h.dropWhen((f) => fromB(h, f) && classify(f) === "UA");
+    h.a.driver.postEvent({ name: "DL_CONNECT_request" });
+    h.settle();
+    return h;
+  };
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") { h.a.driver.postEvent({ name: "DL_DISCONNECT_request" }); h.settle(); } collect(h); } // t01
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") h.injectFrameBytes(h.a, uaTo(h.a, false)); collect(h); } // t04_ua_received_no
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") h.inject(h.a, { name: "all_other_primitives__from_lower_layer" }); collect(h); } // t06
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") { h.a.driver.postEvent({ name: "DL_CONNECT_request" }); h.settle(); } collect(h); } // t07
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") { h.a.driver.postEvent({ name: "DL_UNIT_DATA_request", data: Uint8Array.from([0x01]) }); h.settle(); } collect(h); } // t08
+  // t09_no — a DL-DATA whose layer_3_initiated flag is clear (a connect that the
+  // local layer-3 did NOT initiate); the figure's no-queue branch.
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") { h.a.context.layer3Initiated = false; h.a.driver.postEvent({ name: "DL_DATA_request", data: Uint8Array.from([0x01]), pid: 0xf0 }); h.settle(); } collect(h); } // t09_dl_data_request_no
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") { h.a.driver.postEvent({ name: "all_other_primitives__from_upper_layer" }); h.settle(); } collect(h); } // t11
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") { h.injectFrameBytes(h.a, uiTo(h.a, "q", true)); h.injectFrameBytes(h.a, uiTo(h.a, "r")); } collect(h); } // t12 yes/no
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") h.injectFrameBytes(h.a, sabmTo(h.a)); collect(h); } // t16_sabm_received
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") h.injectFrameBytes(h.a, sabmeTo(h.a)); collect(h); } // t17_sabme_received
+
+  // 31. AwaitingRelease receive/primitive column (figc4.8) — case 13 walks a few;
+  // these add the rest: a redundant DL-DISCONNECT (t01), DL-UNIT-DATA (t05), the
+  // upper (t06) + lower (t04) catch-alls, a SABME (t11 → expedited DM), a DM with
+  // F=0 (t13_no), UI P=1/P=0 (t14), an I-or-S command received with P=1/P=0 (t15
+  // — the figc4.8 catch-all the listener reclassifies an unhandled command into),
+  // and N2 exhaustion of the DISC retransmit (t02_t1_expiry_yes, → DL-ERROR G).
+  const intoAwaitingRelease = (): TwoStationHarness => {
+    const h = New();
+    h.connect();
+    h.dropWhen((f) => fromB(h, f) && classify(f) === "UA");
+    h.a.driver.postEvent({ name: "DL_DISCONNECT_request" });
+    h.settle();
+    return h;
+  };
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") { h.a.driver.postEvent({ name: "DL_DISCONNECT_request" }); h.settle(); } collect(h); } // t01
+  // t02_t1_expiry_yes — drop EVERY frame from B (not just its UA) so the resent
+  // DISC also gets no DM reply; the retransmit then runs to RC == N2 and gives up.
+  { const h = New({ n2: 3 }); h.connect(); h.dropWhen((f) => fromB(h, f)); h.a.driver.postEvent({ name: "DL_DISCONNECT_request" }); h.settle(); for (let r = 0; r < 8 && h.a.state === "AwaitingRelease"; r++) h.advanceT1(); collect(h); } // t02_t1_expiry_yes
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") h.inject(h.a, { name: "all_other_primitives__from_lower_layer" }); collect(h); } // t04
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") { h.a.driver.postEvent({ name: "DL_UNIT_DATA_request", data: Uint8Array.from([0x01]) }); h.settle(); } collect(h); } // t05
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") { h.a.driver.postEvent({ name: "all_other_primitives__from_upper_layer" }); h.settle(); } collect(h); } // t06
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") h.injectFrameBytes(h.a, sabmeTo(h.a)); collect(h); } // t11_sabme_received
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") h.injectFrameBytes(h.a, dmTo(h.a, false)); collect(h); } // t13_dm_received_no
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") { h.injectFrameBytes(h.a, uiTo(h.a, "u", true)); h.injectFrameBytes(h.a, uiTo(h.a, "w")); } collect(h); } // t14 yes/no
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") h.inject(h.a, { name: "i_or_s_command_received", frame: cmdFrameTo(h.a) }); collect(h); } // t15 yes
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") h.inject(h.a, { name: "i_or_s_command_received", frame: cmdFrameNoPollTo(h.a) }); collect(h); } // t15 no
+
+  // 32. Connected receive/primitive column (figc4.4) — the columns cases 3/7/21
+  // leave undriven. DL-UNIT-DATA (t04); DL-FLOW-OFF when already busy (t05_no —
+  // under the ax25Spec43 quirk a not-busy DL-FLOW-OFF enters busy, so the no-op
+  // branch needs an already-busy station); DL-FLOW-ON not busy (t06_no) and busy
+  // with T1 running (t06_yes_yes); a re-issued DL-CONNECT at mod-8 (t07_no) and
+  // mod-128 (t07_yes); the upper-layer catch-all (t08); a control-field error at
+  // mod-8 (t09_no); the never-permitted-info / frame-length error columns at
+  // mod-8 (t10_no/t11_no) and mod-128 (t10_yes/t11_yes); a SABME collision with
+  // frames outstanding (t15_no); a stray UA at mod-8 (t17_no); RNR/REJ/SREJ
+  // responses with N(R) out of the send window at mod-8 and mod-128 (t22/t24/t25
+  // _no_* re-establish branches); and the figc4.4 I-received receive sub-columns
+  // reachable by a crafted I command (N(R) out of window, ack-pending delivery,
+  // reject-exception, own-receiver-busy).
+  { const h = New({ k: 4 }); h.connect(); h.a.driver.postEvent({ name: "DL_UNIT_DATA_request", data: Uint8Array.from([0x01]) }); h.settle(); collect(h); } // t04
+  { const h = New({ k: 4 }); h.connect(); h.setBusy(h.a); h.a.driver.postEvent({ name: "DL_FLOW_OFF_request" }); h.settle(); collect(h); } // t05_dl_flow_off_request_no
+  { const h = New({ k: 4 }); h.connect(); h.a.driver.postEvent({ name: "DL_FLOW_ON_request" }); h.settle(); collect(h); } // t06_dl_flow_on_request_no
+  // t06_yes_yes — own busy AND T1 running. Wedge one I-frame outstanding (drop
+  // B's acks) so T1 stays armed, mark own busy, then clear the busy condition.
+  { const h = New({ k: 4 }); h.connect(); h.dropWhen((f) => fromB(h, f) && isSupervisoryAck(f)); h.submit(h.a, 0x01); h.setBusy(h.a); h.dropWhen(undefined); h.a.driver.postEvent({ name: "DL_FLOW_ON_request" }); h.settle(); collect(h); } // t06_dl_flow_on_request_yes_yes
+  { const h = New({ k: 4 }); h.connect(); h.a.driver.postEvent({ name: "DL_CONNECT_request" }); h.settle(); collect(h); } // t07_dl_connect_request_no (mod-8)
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.a.driver.postEvent({ name: "DL_CONNECT_request" }); h.settle(); collect(h); } // t07_dl_connect_request_yes (mod-128)
+  { const h = New({ k: 4 }); h.connect(); h.a.driver.postEvent({ name: "all_other_primitives__from_upper_layer" }); h.settle(); collect(h); } // t08
+  { const h = New({ k: 4 }); h.connect(); h.inject(h.a, { name: "control_field_error" }); collect(h); } // t09_control_field_error_no (mod-8)
+  { const h = New({ k: 4 }); h.connect(); h.inject(h.a, { name: "info_not_permitted_in_frame" }); collect(h); } // t10_no (mod-8)
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.inject(h.a, { name: "info_not_permitted_in_frame" }); collect(h); } // t10_yes (mod-128)
+  { const h = New({ k: 4 }); h.connect(); h.inject(h.a, { name: "u_or_s_frame_length_error" }); collect(h); } // t11_no (mod-8)
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.inject(h.a, { name: "u_or_s_frame_length_error" }); collect(h); } // t11_yes (mod-128)
+  // t15_sabme_received_no — SABME collision while V(s) != V(a). Wedge one I-frame
+  // outstanding (drop B's acks) so the not-equal branch fires.
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.dropWhen((f) => fromB(h, f) && isSupervisoryAck(f)); h.submit(h.a, 0x01); if (h.a.context.vs !== h.a.context.va) { h.dropWhen(undefined); h.injectFrameBytes(h.a, sabmeTo(h.a)); } collect(h); } // t15_sabme_received_no
+  { const h = New({ k: 4 }); h.connect(); h.injectFrameBytes(h.a, uaTo(h.a, false)); collect(h); } // t17_ua_received_no (mod-8)
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.injectFrameBytes(h.a, rnrExt(h.a, 5, false, false)); collect(h); } // t22_rnr_received_no_yes
+  { const h = New({ srej: true, k: 4 }); h.connect(); h.injectFrameBytes(h.a, srej({ destination: h.a.context.local, source: h.a.context.remote, nr: 5, isCommand: false, pollFinal: false })); collect(h); } // t24_srej_received_no_no (mod-8)
+  { const h = New({ extended: true, srej: true, k: 8 }); h.connect(); h.injectFrameBytes(h.a, srejExt(h.a, 5, false, false)); collect(h); } // t24_srej_received_no_yes
+  { const h = New({ k: 4 }); h.connect(); h.injectFrameBytes(h.a, rej({ destination: h.a.context.local, source: h.a.context.remote, nr: 5, isCommand: false, pollFinal: false })); collect(h); } // t25_rej_received_no_no (mod-8)
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.injectFrameBytes(h.a, rejExt(h.a, 5, false, false)); collect(h); } // t25_rej_received_no_yes
+  // I-received sub-columns (figc4.4 t26).
+  { const h = New({ k: 4 }); h.connect(); h.injectFrameBytes(h.a, iFrame({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, ns: 0, info: Uint8Array.from([0x40]), pollBit: false })); collect(h); } // t26_i_received_yes_yes_no_no (mod-8 N(R) out of window)
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.a.context.acknowledgePending = true; h.injectFrameBytes(h.a, iExt(h.a, 0, 0, 0x41, false)); collect(h); } // t26_i_received_yes_yes_yes_no_yes_no_yes (in-seq, ack pending)
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.a.context.rejectException = true; h.injectFrameBytes(h.a, iExt(h.a, 0, 3, 0x42, true)); collect(h); } // t26_i_received_yes_yes_yes_no_no_yes_yes (out-of-seq, reject exc, P=1)
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.a.driver.postEvent({ name: "DL_FLOW_OFF_request" }); h.settle(); h.injectFrameBytes(h.a, iExt(h.a, 0, 0, 0x43, true)); collect(h); } // t26_i_received_yes_yes_yes_yes_yes (own busy, P=1)
+  { const h = New({ extended: true, k: 8 }); h.connect(); h.a.driver.postEvent({ name: "DL_FLOW_OFF_request" }); h.settle(); h.injectFrameBytes(h.a, iExt(h.a, 0, 0, 0x44, false)); collect(h); } // t26_i_received_yes_yes_yes_yes_no (own busy, P=0)
+
+  // 33. TimerRecovery primitive/flow/error column (figc4.5) — the columns the
+  // injection block (18b-d) leaves undriven, each on its own rig so an earlier
+  // injection can't move A out of recovery first. DL-DISCONNECT (t01 → DISC,
+  // AwaitingRelease); a DL-DATA that pushes + sends a fresh I-frame while
+  // recovering (t02 + t03_no_no_yes); DL-FLOW-OFF already-busy (t05_no) and
+  // DL-FLOW-ON not-busy (t06_no); the never-produced-error inputs whose action is
+  // just Establish_Data_Link (t08/t09/t10 — re-establish, stay); and a SABM with
+  // V(s) != V(a) (t13_sabm_received_no → resync to Connected).
+  { const h = inTR128(1); h.a.driver.postEvent({ name: "DL_DISCONNECT_request" }); h.settle(); collect(h); } // t01
+  { const h = inTR128(1); h.a.driver.postEvent({ name: "DL_DATA_request", data: Uint8Array.from([0x09]), pid: 0xf0 }); h.settle(); collect(h); } // t02 + t03_i_frame_pops_off_queue_no_no_yes
+  { const h = inTR128(1); h.a.driver.postEvent({ name: "DL_FLOW_OFF_request" }); h.settle(); h.a.driver.postEvent({ name: "DL_FLOW_OFF_request" }); h.settle(); collect(h); } // t05_dl_flow_off_request_no
+  { const h = inTR128(1); h.a.driver.postEvent({ name: "DL_FLOW_ON_request" }); h.settle(); collect(h); } // t06_dl_flow_on_request_no
+  { const h = inTR128(1); h.inject(h.a, { name: "control_field_error" }); collect(h); } // t08
+  { const h = inTR128(1); h.inject(h.a, { name: "info_not_permitted_in_frame" }); collect(h); } // t09
+  { const h = inTR128(1); h.inject(h.a, { name: "u_or_s_frame_length_error" }); collect(h); } // t10
+  { const h = inTR128(1); h.injectFrameBytes(h.a, sabmTo(h.a)); collect(h); } // t13_sabm_received_no
+
+  // 34. TimerRecovery RR/RNR receive sub-columns (figc4.5 t18/t19) — out-of-window
+  // and partial-ack N(R) variants, command vs response, at mod-128 and mod-8.
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rrExt(h.a, 5, false, false)); collect(h); } // t18_rr_received_no_no_no
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rrExt(h.a, 5, false, true)); collect(h); } // t18_rr_received_yes_no_yes (mod-128, N(R) oow, F=1)
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rrExt(h.a, 5, true, true)); collect(h); } // t18_rr_received_no_yes_no_yes (mod-128, command P=1, N(R) oow)
+  { const h = inTR8(2); h.injectFrameBytes(h.a, rr({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, isCommand: false, pollFinal: true })); collect(h); } // t18_rr_received_yes_no_no (mod-8)
+  { const h = inTR8(2); h.injectFrameBytes(h.a, rr({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, isCommand: true, pollFinal: true })); collect(h); } // t18_rr_received_no_yes_no_no (mod-8)
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rnrExt(h.a, 1, false, false)); collect(h); } // t19_rnr_received_no_no_yes (in-window response)
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rnrExt(h.a, 5, false, false)); collect(h); } // t19_rnr_received_no_no_no (out-of-window response)
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rnrExt(h.a, 5, false, true)); collect(h); } // t19_rnr_received_yes_no_yes (mod-128, F=1, N(R) oow)
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rnrExt(h.a, 1, false, true)); collect(h); } // t19_rnr_received_yes_yes_no (F=1, N(R) in window, != V(s))
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rnrExt(h.a, 5, true, true)); collect(h); } // t19_rnr_received_no_yes_no_yes (mod-128, command P=1, N(R) oow)
+  { const h = inTR8(2); h.injectFrameBytes(h.a, rnr({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, isCommand: false, pollFinal: true })); collect(h); } // t19_rnr_received_yes_no_no (mod-8)
+  { const h = inTR8(2); h.injectFrameBytes(h.a, rnr({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, isCommand: true, pollFinal: true })); collect(h); } // t19_rnr_received_no_yes_no_no (mod-8)
+
+  // 35. TimerRecovery I-received sub-columns (figc4.5 t22) + N2 exhaustion with
+  // an empty window (t21). An I command with N(R) out of window (mod-8); an
+  // in-sequence I, P=0, with no ack pending; own-receiver-busy I with P=1/P=0; an
+  // out-of-sequence I with reject-exception set (P=1/P=0); the SREJ go-back
+  // first-gap and subsequent-gap branches; and an over-N1 I command. The t21
+  // empty-window N2 give-up runs an idle T3-poll into recovery (V(s)=V(a)) then
+  // starves the retransmit to RC == N2 with the peer not busy.
+  { const h = New({ extended: true, k: 8, n2: 3 }); h.connect(); h.dropWhen((f) => fromB(h, f)); h.inject(h.a, { name: "T3_expiry" }); for (let r = 0; r < 8 && h.a.state === "TimerRecovery"; r++) h.advanceT1(); collect(h); } // t21_t1_expiry_yes_yes_no
+  { const h = inTR8(1); h.injectFrameBytes(h.a, iFrame({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, ns: 0, info: Uint8Array.from([0x23]), pollBit: false })); collect(h); } // t22_i_received_yes_yes_no (mod-8 N(R) oow)
+  { const h = inTR128(1); h.a.context.acknowledgePending = false; h.injectFrameBytes(h.a, iExt(h.a, 0, 0, 0x24, false)); collect(h); } // t22_i_received_yes_yes_yes_no_yes_no_no
+  { const h = inTR128(1); h.a.driver.postEvent({ name: "DL_FLOW_OFF_request" }); h.settle(); h.injectFrameBytes(h.a, iExt(h.a, 0, 0, 0x25, true)); collect(h); } // t22_i_received_yes_yes_yes_yes_yes (own busy, P=1)
+  { const h = inTR128(1); h.a.driver.postEvent({ name: "DL_FLOW_OFF_request" }); h.settle(); h.injectFrameBytes(h.a, iExt(h.a, 0, 0, 0x26, false)); collect(h); } // t22_i_received_yes_yes_yes_yes_no (own busy, P=0)
+  { const h = inTR128(1); h.a.context.rejectException = true; h.injectFrameBytes(h.a, iExt(h.a, 0, 3, 0x27, true)); collect(h); } // t22_i_received_yes_yes_yes_no_no_yes_yes (reject exc, P=1)
+  { const h = inTR128(1); h.a.context.rejectException = true; h.injectFrameBytes(h.a, iExt(h.a, 0, 3, 0x28, false)); collect(h); } // t22_i_received_yes_yes_yes_no_no_yes_no (reject exc, P=0)
+  { const h = inTR128(1, true); h.injectFrameBytes(h.a, iExt(h.a, 0, 1, 0x29, false)); collect(h); } // t22_i_received_yes_yes_yes_no_no_no_yes_no_no (SREJ first gap)
+  { const h = inTR128(1, true); h.a.context.srejExceptionCount = 1; h.injectFrameBytes(h.a, iExt(h.a, 0, 2, 0x2a, false)); collect(h); } // t22_i_received_yes_yes_yes_no_no_no_yes_yes (SREJ subsequent gap)
+  { const h = inTR128(1); const big = new Uint8Array(h.a.context.n1 + 8); h.injectFrameBytes(h.a, iFrame({ destination: h.a.context.local, source: h.a.context.remote, nr: 0, ns: 0, info: big, pollBit: false, extended: true })); collect(h); } // t22_i_received_yes_no (over-N1)
+
+  // 36. TimerRecovery REJ/SREJ receive sub-columns (figc4.5 t23/t24) — partial,
+  // complete, out-of-window, command vs response, at mod-128 and mod-8, plus the
+  // empty-window SREJ branches reached via an idle T3-poll recovery (V(s)=V(a)).
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rejExt(h.a, 1, false, false)); collect(h); } // t23_rej_received_no_no_yes_no (response F=0, partial)
+  { const h = inTR128(1); h.injectFrameBytes(h.a, rejExt(h.a, 1, false, true)); collect(h); } // t23_rej_received_yes_yes_yes (response F=1, complete → Connected)
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rejExt(h.a, 5, true, true)); collect(h); } // t23_rej_received_no_yes_no_yes (mod-128, command P=1, N(R) oow)
+  { const h = inTR8(2); h.injectFrameBytes(h.a, rej({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, isCommand: false, pollFinal: true })); collect(h); } // t23_rej_received_yes_no_no (mod-8)
+  { const h = inTR8(2); h.injectFrameBytes(h.a, rej({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, isCommand: true, pollFinal: true })); collect(h); } // t23_rej_received_no_yes_no_no (mod-8)
+  { const h = inTR128(1, true); h.injectFrameBytes(h.a, srejExt(h.a, 1, true, true)); collect(h); } // t24_srej_received_no_yes_yes_yes (command P=1, complete)
+  { const h = inTR128(2, true); h.injectFrameBytes(h.a, srejExt(h.a, 1, true, false)); collect(h); } // t24_srej_received_no_yes_no_no (command P=0, resend)
+  { const h = inTR128(2, true); h.injectFrameBytes(h.a, srejExt(h.a, 1, false, true)); collect(h); } // t24_srej_received_yes_yes_yes_no (response F=1, partial)
+  { const h = idleTR128srej(); if (h.a.state === "TimerRecovery") h.injectFrameBytes(h.a, srejExt(h.a, h.a.context.vs, true, false)); collect(h); } // t24_srej_received_no_yes_no_yes (command P=0, V(s)=V(a))
+  { const h = idleTR128srej(); if (h.a.state === "TimerRecovery") h.injectFrameBytes(h.a, srejExt(h.a, h.a.context.vs, false, false)); collect(h); } // t24_srej_received_yes_yes_no_yes (response F=0, V(s)=V(a) → Connected)
+  { const h = inTR8(2, true); h.injectFrameBytes(h.a, srej({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, isCommand: false, pollFinal: false })); collect(h); } // t24_srej_received_yes_no_no (mod-8)
+  { const h = inTR8(2, true); h.injectFrameBytes(h.a, srej({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, isCommand: true, pollFinal: false })); collect(h); } // t24_srej_received_no_no_no (mod-8)
+
+
+  // 37. Error-input receive columns (control_field_error / info_not_permitted /
+  // u_or_s_frame_length_error) across the establishment + release states. These
+  // are the figc4.x receive-path malformation events: the SDL handles each with a
+  // DL-ERROR Indication and stays put. They are reached by injecting the
+  // classified error event (the same mechanism the TimerRecovery/Connected error
+  // rigs above use) — the figc4.x receive path raises these on a malformed frame.
+  // The data-link figc4.6 t04_no buffer-while-v2.2-pending closes that column too.
+  { const h = New(); h.inject(h.a, { name: "control_field_error" }); collect(h); } // Disconnected t07
+  { const h = New(); h.inject(h.a, { name: "info_not_permitted_in_frame" }); collect(h); } // Disconnected t08
+  { const h = New(); h.inject(h.a, { name: "u_or_s_frame_length_error" }); collect(h); } // Disconnected t09
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") h.inject(h.a, { name: "control_field_error" }); collect(h); } // AwaitingConnection t13
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") h.inject(h.a, { name: "info_not_permitted_in_frame" }); collect(h); } // AwaitingConnection t14
+  { const h = intoAwaitingConnection(); if (h.a.state === "AwaitingConnection") h.inject(h.a, { name: "u_or_s_frame_length_error" }); collect(h); } // AwaitingConnection t15
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") h.inject(h.a, { name: "control_field_error" }); collect(h); } // AwaitingRelease t07
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") h.inject(h.a, { name: "info_not_permitted_in_frame" }); collect(h); } // AwaitingRelease t08
+  { const h = intoAwaitingRelease(); if (h.a.state === "AwaitingRelease") h.inject(h.a, { name: "u_or_s_frame_length_error" }); collect(h); } // AwaitingRelease t09
+
+  // AwaitingV22Connection (figc4.6) — a not-layer-3-initiated DL-DATA buffers
+  // (t04_no), and the two error-input columns raise their DL-ERROR Indication.
+  const intoAwaitingV22 = (): TwoStationHarness => {
+    const h = New({ extended: true });
+    h.dropWhen((f) => isSabmOrSabme(f) && fromA(h, f));
+    h.a.driver.postEvent({ name: "DL_CONNECT_request" });
+    h.settle();
+    return h;
+  };
+  { const h = intoAwaitingV22(); if (h.a.state === "AwaitingV22Connection") { h.a.context.layer3Initiated = false; h.a.driver.postEvent({ name: "DL_DATA_request", data: Uint8Array.from([0x01]), pid: 0xf0 }); h.settle(); } collect(h); } // t04_dl_data_request_no
+  { const h = intoAwaitingV22(); if (h.a.state === "AwaitingV22Connection") h.inject(h.a, { name: "info_not_permitted_in_frame" }); collect(h); } // t08
+  { const h = intoAwaitingV22(); if (h.a.state === "AwaitingV22Connection") h.inject(h.a, { name: "u_or_s_frame_length_error" }); collect(h); } // t09
+
+  // 38. TimerRecovery REJ/SREJ out-of-window remainders (figc4.5) — a REJ response
+  // F=1 with N(R) out of window at mod-128 (t23 yes_no_yes) and the mod-8 REJ
+  // response F=0 out-of-window go-back (t23 no_no_no_no), plus an SREJ command
+  // with N(R) out of window at mod-128 (t24 no_no_yes).
+  { const h = inTR128(2); h.injectFrameBytes(h.a, rejExt(h.a, 5, false, true)); collect(h); } // t23_rej_received_yes_no_yes (mod-128)
+  { const h = inTR8(2); h.injectFrameBytes(h.a, rej({ destination: h.a.context.local, source: h.a.context.remote, nr: 7, isCommand: false, pollFinal: false })); collect(h); } // t23_rej_received_no_no_no_no (mod-8)
+  { const h = inTR128(2, true); h.injectFrameBytes(h.a, srejExt(h.a, 5, true, false)); collect(h); } // t24_srej_received_no_no_yes (mod-128)
+
   // The OR'd membership predicate over every rig.
   return (from, id) => rigs.some((h) => h.firedTransition(from, id));
 }
 
-describe("v2.2 arc V5a — behavioural transition-coverage ledger", () => {
+describe("v2.2 arc V5b — behavioural transition-coverage ledger", () => {
   it("the scenario battery meets the curated floor and reports per-state coverage", () => {
     const fired = runBatteryAndCollectFired();
 
@@ -948,13 +1221,35 @@ describe("v2.2 arc V5a — behavioural transition-coverage ledger", () => {
     console.log(lines.join("\n"));
 
     // ── Assert: each reachable state is behaviourally exercised (a curated,
-    // robust must-hit — confirmed-fired ids the battery is built to drive).
-    // AwaitingV22Connection is driven extensively since V5a (now 20/25 — the
-    // residual 5 misses are the never-produced error inputs t08/t09 and the
-    // not-layer-3-initiated branches t04_no/t05; the responder never parks here,
-    // it goes straight Disconnected→Connected on SABME). The MDL
-    // (management_data_link) machine is now on the ledger too (Ready /
-    // Negotiating, both fully exercised). Mirrors the C# must-hit set. ──
+    // robust must-hit — confirmed-fired ids the battery is built to drive). As of
+    // v2.2 arc V5b the battery drives every REACHABLE transition across all six
+    // data-link states plus the MDL machine (238/250). The 12 remaining misses
+    // are GENUINELY unreachable through the real runtime, in three classes:
+    //
+    //   1. I_frame_pops_off_queue variants the canTransmitIFrame gate suppresses
+    //      (packet.net#263). The synthetic "I-frame pops off the queue" event is
+    //      only generated from Connected / TimerRecovery with the peer not busy
+    //      and the window not full; a queued frame in any other situation stays
+    //      buffered and the pop event is never synthesised. So:
+    //        AwaitingConnection    t10_i_frame_pops_off_queue_yes / _no
+    //        AwaitingV22Connection t05_i_frame_pops_off_queue_yes / _no
+    //        Connected             t03_i_frame_pops_off_queue_yes (peer busy)
+    //        Connected             t03_i_frame_pops_off_queue_no_yes (window full)
+    //        TimerRecovery         t03_i_frame_pops_off_queue_yes (peer busy)
+    //        TimerRecovery         t03_i_frame_pops_off_queue_no_yes (window full)
+    //        TimerRecovery         t03_i_frame_pops_off_queue_no_no_no (T1 idle —
+    //                              but T1 is always running in recovery)
+    //   2. The I-response columns (Connected t26_i_received_no /
+    //      TimerRecovery t22_i_received_no, both guarded `!command`). I-frames are
+    //      command-only on the wire (§4.2.1); the codec cannot produce an
+    //      I-response, so an I_received event is always a command.
+    //   3. TimerRecovery t06_dl_flow_on_request_yes_no (own busy & !T1_running) —
+    //      T1 is by definition always running while in the recovery state, so the
+    //      !T1_running branch can't be reached from TimerRecovery.
+    //
+    // The MDL (management_data_link) machine is on the ledger too (Ready /
+    // Negotiating, both fully exercised). Mirrors the C# must-hit set + the C#
+    // lift (parity leg). ──
     const mustHit: ReadonlyArray<readonly [string, string]> = [
       ["Disconnected", "t03_dl_connect_request"], // A initiates a connect
       ["Disconnected", "t13_sabm_received_yes"], // B accepts an incoming SABM
@@ -979,6 +1274,32 @@ describe("v2.2 arc V5a — behavioural transition-coverage ledger", () => {
       ["TimerRecovery", "t12_dm_received"], // V5a: DM teardown while recovering
       ["TimerRecovery", "t20_lm_seize_confirm_yes"], // V5a: LM-SEIZE-confirm with ack pending
       ["TimerRecovery", "t14_sabme_received_no"], // V5a: SABME collision while recovering
+      // V5b reachable-coverage lift — receive/primitive columns now driven.
+      ["Disconnected", "t01_dl_disconnect_request"], // V5b: redundant disconnect (no-op confirm)
+      ["Disconnected", "t05_all_other_commands"], // V5b: reclassified command catch-all → DM
+      ["Disconnected", "t11_ui_received_yes"], // V5b: UI P=1 → DM F=1
+      ["Disconnected", "t13_sabm_received_no"], // V5b: SABM while unable to establish → DM
+      ["Disconnected", "t07_control_field_error"], // V5b: malformed-frame error input → DL-ERROR L
+      ["AwaitingConnection", "t07_dl_connect_request"], // V5b: redundant connect (discard queue)
+      ["AwaitingConnection", "t04_ua_received_no"], // V5b: UA F=0 → DL-ERROR D
+      ["AwaitingConnection", "t16_sabm_received"], // V5b: SABM collision → UA
+      ["AwaitingConnection", "t17_sabme_received"], // V5b: SABME → DM (routes to figc4.6)
+      ["AwaitingV22Connection", "t04_dl_data_request_no"], // V5b: buffer-while-v2.2-pending (not-l3-initiated)
+      ["AwaitingV22Connection", "t08_info_not_permitted_in_frame"], // V5b: error input → DL-ERROR M
+      ["Connected", "t07_dl_connect_request_no"], // V5b: re-issued connect at mod-8 → re-establish
+      ["Connected", "t15_sabme_received_no"], // V5b: SABME collision with frames outstanding
+      ["Connected", "t25_rej_received_no_yes"], // V5b: REJ N(R) out of window → re-establish (v2.2)
+      ["Connected", "t26_i_received_yes_yes_no_no"], // V5b: I command N(R) out of window (mod-8)
+      ["AwaitingRelease", "t02_t1_expiry_yes"], // V5b: DISC retransmit N2 exhaustion → DL-ERROR G
+      ["AwaitingRelease", "t11_sabme_received"], // V5b: SABME during release → expedited DM
+      ["AwaitingRelease", "t15_i_or_s_command_received_yes"], // V5b: I/S command during release → DM F=1
+      ["TimerRecovery", "t01_dl_disconnect_request"], // V5b: disconnect while recovering → AwaitingRelease
+      ["TimerRecovery", "t02_dl_data_request"], // V5b: DL-DATA while recovering (queue + send)
+      ["TimerRecovery", "t13_sabm_received_no"], // V5b: SABM with V(s)!=V(a) → resync
+      ["TimerRecovery", "t19_rnr_received_yes_yes_no"], // V5b: RNR F=1, partial-ack recovery
+      ["TimerRecovery", "t22_i_received_yes_yes_yes_yes_yes"], // V5b: own-busy I delivery while recovering
+      ["TimerRecovery", "t23_rej_received_yes_yes_yes"], // V5b: REJ F=1 completes recovery → Connected
+      ["TimerRecovery", "t21_t1_expiry_yes_yes_no"], // V5b: empty-window N2 give-up (no peer busy)
       // MDL (management_data_link) — XID negotiation FSM, on the ledger via V5a.
       ["Ready", "t01_mdl_negotiate_request"], // XID command sent on a v2.2 connect
       ["Negotiating", "t01_xid_response_received_yes"], // negotiation completes (F=1)
@@ -994,14 +1315,17 @@ describe("v2.2 arc V5a — behavioural transition-coverage ledger", () => {
     ).toEqual([]);
 
     // ── Assert: a floor on total behavioural coverage (regression guard) ──
-    // Mirrors the C# floor of 122/250: V5a's extended-mode data/loss/recovery +
-    // the MDL machine + segmentation lift the battery well above the V2-era
-    // baseline. If this drops, a scenario regressed or a path stopped being
-    // reached.
+    // Raised 122 → 238/250 (v2.2 arc V5b: the reachable receive/primitive columns
+    // across every data-link state are now driven on isolated rigs — Disconnected
+    // 6→17, AwaitingConnection 9→23, AwaitingV22Connection 20→23, Connected
+    // 39→63, AwaitingRelease 6→20, TimerRecovery 38→85; Ready/Negotiating already
+    // full). The remaining 12 misses are GENUINELY unreachable through the runtime
+    // (see the report log + the curated list below). If this drops, a scenario
+    // regressed or a path stopped being reached.
     expect(
       hit,
       `the scenario battery should behaviourally exercise a substantial share of the ${total} transitions; ` +
         "if this drops, a scenario regressed or a path stopped being reached",
-    ).toBeGreaterThanOrEqual(122);
+    ).toBeGreaterThanOrEqual(238);
   });
 });
