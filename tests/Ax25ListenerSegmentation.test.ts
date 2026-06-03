@@ -1,0 +1,140 @@
+/**
+ * Listener-level coverage of the §6.6 segmentation seam wired into
+ * {@link Ax25Listener} — the TS port of packet.net's
+ * `Ax25ListenerSegmentationTests`. {@link Ax25Listener.sendData} routes an
+ * over-N1 payload through the per-session {@link SegmentationLayer} on send (so
+ * it leaves the modem as several PID-0x08 I-frames), rejects an over-N1 payload
+ * cleanly when the segmenter is not negotiated, and the receive-side
+ * reassembler is wired into the upward-signal fan-out.
+ */
+import { describe, expect, it } from "vitest";
+import { Callsign } from "../src/callsign.js";
+import {
+  type Ax25Frame,
+  PID_NO_LAYER_3,
+  PID_SEGMENTED,
+  classify,
+  sabm,
+} from "../src/frame.js";
+import {
+  Ax25Listener,
+  type Ax25ListenerSession,
+} from "../src/listener.js";
+import type { Ax25SessionContext } from "../src/sdl/session-context.js";
+import {
+  LoopbackTransport,
+  waitFor,
+  withTimeout,
+} from "./listener-test-support.js";
+
+const LocalCall = Callsign.parse("M0LTE");
+const PeerCall = Callsign.parse("G7XYZ-7");
+
+/** Accept an inbound SABM and return the Connected session, with the session's
+ * context customised via `configure` before any events flow (so
+ * segmenterReassemblerEnabled / n1 are set in time). */
+async function acceptedSession(
+  configure: (ctx: Ax25SessionContext) => void,
+): Promise<{
+  listener: Ax25Listener;
+  transport: LoopbackTransport;
+  session: Ax25ListenerSession;
+}> {
+  const transport = new LoopbackTransport();
+  const listener = new Ax25Listener(transport, {
+    myCall: LocalCall,
+    configureSession: (s) => configure(s.context),
+  });
+  const accepted = new Promise<Ax25ListenerSession>((resolve) => {
+    listener.onSessionAccepted((s) => resolve(s));
+  });
+
+  await listener.start();
+  transport.injectInbound(sabm({ destination: LocalCall, source: PeerCall }));
+  const session = await withTimeout(accepted, 2000, "sessionAccepted");
+  await transport.sentFrames.waitForCount(1, 2000); // the UA
+  expect(session.state).toBe("Connected");
+  return { listener, transport, session };
+}
+
+describe("Ax25Listener — segmentation seam", () => {
+  it("sendData segments an over-N1 payload into PID-0x08 I-frames on the wire", async () => {
+    const { listener, transport, session } = await acceptedSession((ctx) => {
+      ctx.n1 = 64;
+      ctx.k = 16;
+      ctx.segmenterReassemblerEnabled = true;
+    });
+
+    const ua = transport.sentFrames.count; // frames already sent (the UA)
+    const payload = Uint8Array.from({ length: 300 }, (_, i) => i & 0xff); // 5 segments at N1=64
+
+    listener.sendData(session, payload);
+
+    // Five I-frames, each carrying PID 0x08, should hit the modem.
+    await transport.sentFrames.waitForCount(ua + 5, 2000);
+    const frames: Ax25Frame[] = [];
+    for (let i = ua; i < ua + 5; i++) frames.push(transport.decodedSent(i));
+
+    expect(frames.length).toBe(5);
+    expect(frames.every((f) => classify(f) === "I")).toBe(true); // each segment is a normal I-frame
+    expect(frames.every((f) => f.pid === PID_SEGMENTED)).toBe(true); // PID 0x08 on every segment
+
+    await listener.dispose();
+  });
+
+  it("sendData passes a within-N1 payload as a single I-frame", async () => {
+    const { listener, transport, session } = await acceptedSession((ctx) => {
+      ctx.n1 = 256;
+      ctx.segmenterReassemblerEnabled = true;
+    });
+
+    const ua = transport.sentFrames.count;
+    listener.sendData(session, new Uint8Array(100), PID_NO_LAYER_3);
+
+    await transport.sentFrames.waitForCount(ua + 1, 2000);
+    const f = transport.decodedSent(ua);
+    expect(f.pid).toBe(PID_NO_LAYER_3); // within-N1 passes through with its L3 PID, unsegmented
+
+    await listener.dispose();
+  });
+
+  it("sendData rejects an over-N1 payload when the segmenter is not negotiated", async () => {
+    const { listener, session } = await acceptedSession((ctx) => {
+      ctx.n1 = 256;
+      ctx.segmenterReassemblerEnabled = false; // v2.0 / not negotiated
+    });
+
+    expect(() => listener.sendData(session, new Uint8Array(300))).toThrow(
+      /segmenter\/reassembler has not been negotiated/,
+    );
+
+    await listener.dispose();
+  });
+
+  it("sendData rejects a session the listener does not own", async () => {
+    const { listener } = await acceptedSession(() => {});
+
+    // A session this listener never built. The simplest "alien" is a separate
+    // listener's session for a different peer.
+    const otherTransport = new LoopbackTransport();
+    const otherListener = new Ax25Listener(otherTransport, {
+      myCall: LocalCall,
+    });
+    const accepted = new Promise<Ax25ListenerSession>((resolve) =>
+      otherListener.onSessionAccepted((s) => resolve(s)),
+    );
+    await otherListener.start();
+    otherTransport.injectInbound(
+      sabm({ destination: LocalCall, source: Callsign.parse("M5ABC-3") }),
+    );
+    const alien = await withTimeout(accepted, 2000, "alien session");
+    await waitFor(() => alien.state === "Connected", 2000);
+
+    expect(() => listener.sendData(alien, new Uint8Array(10))).toThrow(
+      /not owned by this listener/,
+    );
+
+    await listener.dispose();
+    await otherListener.dispose();
+  });
+});

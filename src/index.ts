@@ -78,6 +78,7 @@ export {
   MAX_DIGIPEATERS,
   PID_NET_ROM,
   PID_NO_LAYER_3,
+  PID_SEGMENTED,
   classify,
   decodeFrame,
   disc,
@@ -138,6 +139,17 @@ export {
 } from "./sdl/session-quirks.js";
 export type { DataLinkSignal, MdlSignal } from "./sdl/action-dispatcher.js";
 export { Ax25ManagementDataLink } from "./sdl/management-data-link.js";
+export {
+  type DataLinkDataIndication,
+  SegmentationLayer,
+} from "./sdl/segmentation-layer.js";
+export {
+  Reassembler,
+  SEGMENT_COUNT_MASK,
+  SEGMENT_FIRST_BIT,
+  SEGMENT_MAX_SEGMENTS,
+  segment,
+} from "./sdl/segmenter.js";
 export {
   applyNegotiated,
   applyVersion20Defaults,

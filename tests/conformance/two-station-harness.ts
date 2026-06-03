@@ -55,6 +55,7 @@ import {
   createSessionContext,
   modulus,
 } from "../../src/sdl/session-context.js";
+import { SegmentationLayer } from "../../src/sdl/segmentation-layer.js";
 import {
   type Ax25SessionQuirks,
   defaultSessionQuirks,
@@ -181,6 +182,11 @@ export class Endpoint {
      * parameters mutate {@link context} — the same context the data-link runs
      * on. Mirrors `Endpoint.Mdl`. */
     readonly mdl: Ax25ManagementDataLink,
+    /** This station's §6.6 segmentation-reassembly shim — used by
+     * {@link TwoStationHarness.submitLarge} on the send side and wired into the
+     * driver's upward-signal fan-out on the receive side. Mirrors
+     * `Endpoint.Segmentation`. */
+    readonly segmentation: SegmentationLayer,
   ) {}
 
   /** The current SDL state name. */
@@ -213,6 +219,14 @@ export interface HarnessOptions {
   xidOfferA?: XidParameters;
   /** Station B's explicit XID offer. Mirrors the C# harness's `xidOfferB`. */
   xidOfferB?: XidParameters;
+  /** Enable the §6.6 segmenter/reassembler on both endpoints (sets
+   * `ctx.segmenterReassemblerEnabled`) — the gate {@link submitLarge} segments
+   * on. Defaults false. Mirrors the C# harness's `segmenter`. */
+  segmenter?: boolean;
+  /** Override the spec-default N1 (max info-field octets; default 256) on both
+   * endpoints — small values force a modest payload to span several segments.
+   * Mirrors the C# harness's `n1`. */
+  n1?: number;
 }
 
 function mapKindToEvent(kind: string): string | null {
@@ -313,6 +327,8 @@ export class TwoStationHarness {
       quirks = defaultSessionQuirks,
       xidOfferA,
       xidOfferB,
+      segmenter = false,
+      n1,
     } = opts;
     const nodeA = Callsign.parse("M0LTEA-1");
     const nodeB = Callsign.parse("M0LTEB-2");
@@ -340,7 +356,7 @@ export class TwoStationHarness {
       new ManualScheduler(),
       link,
       () => refs.b as Endpoint,
-      { srej, k, t1Ms, n2, extended, quirks, xidOffer: xidOfferA },
+      { srej, k, t1Ms, n2, extended, quirks, xidOffer: xidOfferA, segmenter, n1 },
       onTransitionFired,
     );
     const b = buildEndpoint(
@@ -349,7 +365,7 @@ export class TwoStationHarness {
       new ManualScheduler(),
       link,
       () => refs.a as Endpoint,
-      { srej, k, t1Ms, n2, extended, quirks, xidOffer: xidOfferB },
+      { srej, k, t1Ms, n2, extended, quirks, xidOffer: xidOfferB, segmenter, n1 },
       onTransitionFired,
     );
     refs.a = a;
@@ -426,6 +442,24 @@ export class TwoStationHarness {
       data: bytes,
       pid: 0xf0,
     });
+    this.pumpToQuiescence();
+    if (this.checkAfterEachStep) this.checkInvariants();
+  }
+
+  /**
+   * Submit one (possibly > N1) upper-layer payload through the §6.6
+   * segmentation shim at `from`. Records the WHOLE payload as a single logical
+   * submission (so the oracle expects one reassembled delivery), then posts each
+   * segment-request the shim produces as its own I-frame. With the segmenter
+   * disabled this posts a single un-segmented request (and throws if the payload
+   * exceeds N1, per the shim's strict reject). Mirrors the C#
+   * `TwoStationHarness.SubmitLarge`.
+   */
+  submitLarge(from: Endpoint, payload: Uint8Array): void {
+    from.submitted.push(payload);
+    for (const request of from.segmentation.buildSendRequests(payload)) {
+      from.driver.postEvent(request);
+    }
     this.pumpToQuiescence();
     if (this.checkAfterEachStep) this.checkInvariants();
   }
@@ -630,6 +664,8 @@ function buildEndpoint(
     extended: boolean;
     quirks: Ax25SessionQuirks;
     xidOffer?: XidParameters;
+    segmenter: boolean;
+    n1?: number;
   },
   onTransitionFired: (
     spec: { from: string; id: string },
@@ -642,6 +678,14 @@ function buildEndpoint(
   ctx.srejEnabled = opts.srej;
   ctx.isExtended = opts.extended;
   ctx.quirks = { ...opts.quirks };
+  ctx.segmenterReassemblerEnabled = opts.segmenter;
+  if (opts.n1 !== undefined) ctx.n1 = opts.n1;
+
+  // The per-station §6.6 segmentation shim, over the same context the data-link
+  // runs on. Used by `submitLarge` on the send side and wired into `emitUpward`
+  // on the receive side (below). Mirrors the C# `BuildEndpoint`'s
+  // `new SegmentationLayer(ctx)`.
+  const segmentation = new SegmentationLayer(ctx);
 
   // The Endpoint is constructed last (it needs the driver), but the driver's
   // closures only *run* later, during postEvent — by which point `endpoint` is
@@ -712,7 +756,19 @@ function buildEndpoint(
 
   const driver = new SdlSessionDriver(ctx, scheduler, {
     sendFrame: send,
+    // Receive-side segmentation seam — mirrors the C# harness `sendUpward` (and
+    // `Ax25Listener.emitUpward`): a 0x08-PID DL-DATA indication is fed to the
+    // reassembler and only surfaced (as one reassembled indication) when the
+    // series completes; a non-segment DL-DATA indication passes through
+    // unchanged; non-DATA signals bypass the shim. So `endpoint.delivered` shows
+    // reassembled payloads, letting the convergence oracle compare one logical
+    // submission to one logical delivery.
     emitUpward: (sig: DataLinkSignal) => {
+      if (sig.type === "DL_DATA_indication") {
+        const reassembled = segmentation.onDataIndication(sig);
+        if (reassembled === null) return; // mid-series segment — nothing yet
+        sig = reassembled;
+      }
       endpoint.signals.push(sig);
       if (
         sig.type === "DL_DATA_indication" ||
@@ -733,7 +789,14 @@ function buildEndpoint(
     mdl: { onMdlNegotiateRequest: () => mdl.negotiate() },
   });
 
-  endpoint = new Endpoint(local.toString(), ctx, driver, scheduler, mdl);
+  endpoint = new Endpoint(
+    local.toString(),
+    ctx,
+    driver,
+    scheduler,
+    mdl,
+    segmentation,
+  );
   return endpoint;
 }
 
