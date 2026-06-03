@@ -12,6 +12,14 @@ export const PID_NO_LAYER_3 = 0xf0;
 /** PID 0xCF — NET/ROM. */
 export const PID_NET_ROM = 0xcf;
 
+/**
+ * PID 0x08 — segmentation fragment (AX.25 v2.2 §6.6 / Figure 6.2). An I-frame
+ * carrying this PID is one segment of a larger Layer-3 payload; its info field
+ * is the `FXXXXXXX` segment-control octet followed by the fragment bytes. See
+ * {@link Segmenter} / {@link Reassembler}. Mirrors the C# `Ax25Frame.PidSegmented`.
+ */
+export const PID_SEGMENTED = 0x08;
+
 /** Maximum digipeater chain length (§3.12.5). */
 export const MAX_DIGIPEATERS = 8;
 

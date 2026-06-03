@@ -216,12 +216,24 @@ function lcg(seed: number): () => number {
 describe("loss-recovery — deep recovery properties", () => {
   // FsCheck seed space, swept exhaustively over the bounded ranges the C#
   // `[Property]` draws: n ∈ 1..6 I-frames, dropPos ∈ 0..n-1, both REJ and SREJ.
-  const singleDropSeeds: { n: number; dropPos: number; srej: boolean }[] = [];
+  // The `extended` axis (V4a) fuzzes the SAME recovery space at BOTH modulos
+  // (mod-8 and mod-128): the dropped-frame N(S) match reads the frame's
+  // mode-aware `getNs`, so the property holds in the 7-bit space too. Mirrors
+  // the C# `extended` parameter added to
+  // `A_single_dropped_iframe_always_recovers`.
+  const singleDropSeeds: {
+    n: number;
+    dropPos: number;
+    srej: boolean;
+    extended: boolean;
+  }[] = [];
   for (let seedN = 0; seedN < 6; seedN++) {
     const n = 1 + seedN; // 1..6
     for (let dropPos = 0; dropPos < n; dropPos++) {
       for (const srej of [false, true]) {
-        singleDropSeeds.push({ n, dropPos, srej });
+        for (const extended of [false, true]) {
+          singleDropSeeds.push({ n, dropPos, srej, extended });
+        }
       }
     }
   }
@@ -230,12 +242,14 @@ describe("loss-recovery — deep recovery properties", () => {
   // purely through `advanceT1()` (no injected trigger): connect, submit n
   // frames, drop the one with N(s)=dropPos once, then drive T1 recovery until
   // the link converges. Both modes converge: SREJ does single-frame selective
-  // retransmit of the gap; REJ does timeout-driven go-back-N.
-  for (const { n, dropPos, srej } of singleDropSeeds) {
+  // retransmit of the gap; REJ does timeout-driven go-back-N. Both modulos
+  // converge: the recovery bindings are mod-aware (% modulus everywhere).
+  for (const { n, dropPos, srej, extended } of singleDropSeeds) {
     const mode = srej ? "SREJ" : "REJ";
-    it(`single dropped I-frame always recovers [n=${n} drop=N(s)${dropPos} ${mode}]`, () => {
+    const modLabel = extended ? "mod128" : "mod8";
+    it(`single dropped I-frame always recovers [n=${n} drop=N(s)${dropPos} ${mode} ${modLabel}]`, () => {
       const k = Math.max(4, n);
-      const h = TwoStationHarness.build({ srej, k });
+      const h = TwoStationHarness.build({ srej, k, extended });
       h.connect();
       h.checkAfterEachStep = false;
 
@@ -261,6 +275,7 @@ describe("loss-recovery — deep recovery properties", () => {
     budget: number;
     pattern: number;
     srej: boolean;
+    extended: boolean;
   }[] = [];
   for (let seedN = 0; seedN < 6; seedN++) {
     const n = 1 + seedN; // 1..6
@@ -268,18 +283,22 @@ describe("loss-recovery — deep recovery properties", () => {
       const budget = mod(seedBudget, n + 1); // 0..n total drops — finite
       for (const pattern of [1, 2, 7]) {
         for (const srej of [false, true]) {
-          burstSeeds.push({ n, budget, pattern, srej });
+          for (const extended of [false, true]) {
+            burstSeeds.push({ n, budget, pattern, srej, extended });
+          }
         }
       }
     }
   }
 
-  for (const { n, budget, pattern, srej } of burstSeeds) {
+  for (const { n, budget, pattern, srej, extended } of burstSeeds) {
     const mode = srej ? "SREJ" : "REJ";
-    it(`finite bidirectional loss burst recovers [n=${n} budget=${budget} pat=${pattern} ${mode}]`, () => {
+    const modLabel = extended ? "mod128" : "mod8";
+    it(`finite bidirectional loss burst recovers [n=${n} budget=${budget} pat=${pattern} ${mode} ${modLabel}]`, () => {
       const k = Math.max(4, n);
       // N2 generous so the link doesn't give up before the finite loss clears.
-      const h = TwoStationHarness.build({ srej, k, n2: 40 });
+      // `extended` fuzzes both the mod-8 and mod-128 sequence spaces (V4a).
+      const h = TwoStationHarness.build({ srej, k, n2: 40, extended });
       h.connect();
       h.checkAfterEachStep = false;
 

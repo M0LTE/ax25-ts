@@ -1,6 +1,7 @@
 import { Callsign } from "./callsign.js";
 import {
   type Ax25Frame,
+  PID_NO_LAYER_3,
   classify,
   decodeFrame,
   encodeFrame,
@@ -14,6 +15,7 @@ import {
   createSessionContext,
 } from "./sdl/session-context.js";
 import { SdlSessionDriver } from "./sdl/session-driver.js";
+import { SegmentationLayer } from "./sdl/segmentation-layer.js";
 import { RealTimerScheduler, type TimerScheduler } from "./sdl/timer-scheduler.js";
 import type { Ax25Transport } from "./transport.js";
 
@@ -234,6 +236,15 @@ interface CachedSession {
    * `CachedSession.Mdl`.
    */
   readonly mdl: Ax25ManagementDataLink;
+  /**
+   * The session's §6.6 segmentation-reassembly shim. Sits at the DL primitive
+   * boundary: the send helper ({@link Ax25Listener.sendData}) runs an over-N1
+   * payload through its segmenter, and the `emitUpward` fan-out runs every
+   * inbound DL-DATA indication through its reassembler (0x08 PID → reassemble,
+   * else pass through). One per session — it owns the per-session reassembly
+   * buffer. Mirrors the C# listener's `CachedSession.Segmentation`.
+   */
+  readonly segmentation: SegmentationLayer;
 }
 
 /**
@@ -421,6 +432,54 @@ export class Ax25Listener {
     });
   }
 
+  /**
+   * Send an upper-layer (Layer-3) payload over an established session, applying
+   * §6.6 segmentation at the DL boundary. This is the send-side counterpart to
+   * the receive-side reassembly wired into every session's upward-signal
+   * fan-out. Mirrors the C# `Ax25Listener.SendData`.
+   *
+   * If the session has negotiated the segmenter
+   * ({@link Ax25SessionContext.segmenterReassemblerEnabled}) and the payload
+   * exceeds N1, the payload is split into PID-0x08 I-frame segments and each is
+   * posted as its own `DL_DATA_request`. Otherwise a single un-segmented request
+   * is posted. An over-N1 payload on a session that has *not* negotiated the
+   * segmenter throws — the request is rejected cleanly rather than truncated or
+   * sent oversize.
+   *
+   * Callers that want to send a raw, never-segmented request (e.g. a frame they
+   * have already segmented, or a control payload) can still post a
+   * `DL_DATA_request` via {@link Ax25ListenerSession.postEvent} / `write`; this
+   * helper is the segmentation-aware path.
+   *
+   * @param session A session previously returned by {@link connect} or the
+   *   `sessionAccepted` event.
+   * @param data The upper-layer payload.
+   * @param pid The Layer-3 PID for the (un-segmented) request. Defaults to
+   *   `0xF0` (no-layer-3).
+   * @throws Error if `session` is not a session this listener owns.
+   * @throws Error if the payload exceeds N1 and the segmenter has not been
+   *   negotiated for this session.
+   */
+  sendData(
+    session: Ax25ListenerSession,
+    data: Uint8Array,
+    pid: number = PID_NO_LAYER_3,
+  ): void {
+    if (this.disposed) throw new Error("Ax25Listener has been disposed");
+
+    const cached = this.sessions.get(session.to.toString());
+    if (!cached || cached.session !== session) {
+      throw new Error(
+        "the supplied session is not owned by this listener (it was not produced by connect() / " +
+          "sessionAccepted, or has been evicted from the cache).",
+      );
+    }
+
+    for (const request of cached.segmentation.buildSendRequests(data, pid)) {
+      session.postEvent(request);
+    }
+  }
+
   /** Stop the inbound pump and release the transport. */
   async stop(): Promise<void> {
     if (!this.startedFlag) return;
@@ -601,6 +660,7 @@ export class Ax25Listener {
 
     const scheduler = new RealTimerScheduler();
     const signals: DataLinkSignal[] = [];
+    const segmentation = new SegmentationLayer(ctx);
 
     let sessionRef: Ax25ListenerSession | null = null;
 
@@ -615,7 +675,20 @@ export class Ax25Listener {
       }
     };
 
+    // Receive-side segmentation seam (§2.4 / §6.6): every DL-DATA indication
+    // passes through the reassembler first. A 0x08-PID segment is consumed and
+    // only delivered when the series completes (the shim returns null until the
+    // last segment); a non-segment indication passes through unchanged. Non-DATA
+    // signals (connect/disconnect/error) bypass the shim entirely. The
+    // dispatcher's `DL_DATA_indication => emitUpward(...)` is untouched — the
+    // seam is here at the boundary, keeping the dispatcher / SDL clean. Mirrors
+    // the C# listener's `SendUpward`.
     const emitUpward = (sig: DataLinkSignal): void => {
+      if (sig.type === "DL_DATA_indication") {
+        const reassembled = segmentation.onDataIndication(sig);
+        if (reassembled === null) return; // mid-series segment — nothing to deliver yet
+        sig = reassembled;
+      }
       signals.push(sig);
       sessionRef?._raiseDataLinkSignal(sig);
     };
@@ -657,7 +730,7 @@ export class Ax25Listener {
 
     const session = new Ax25ListenerSession(driver);
     sessionRef = session;
-    return { session, driver, scheduler, signals, mdl };
+    return { session, driver, scheduler, signals, mdl, segmentation };
   }
 
   private addToCache(peer: Callsign, built: CachedSession): void {
