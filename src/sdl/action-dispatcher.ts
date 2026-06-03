@@ -22,6 +22,8 @@ import {
   type Ax25SessionContext,
   decrementSeq,
   incrementSeq,
+  isOutstanding,
+  pruneAcknowledgedSentIFrames,
 } from "./session-context.js";
 import type { SubroutineRegistry } from "./subroutine-registry.js";
 import type { TimerName, TimerScheduler } from "./timer-scheduler.js";
@@ -468,7 +470,7 @@ export class ActionDispatcher {
       case "RC := 0":                   ctx.rc = 0; return;
       case "RC := 1":                   ctx.rc = 1; return;
       case "RC := RC + 1":              ctx.rc++; return;
-      case "V(a) := N(r)":              ctx.va = extractNr(tx); return;
+      case "V(a) := N(r)":              advanceVa(ctx, extractNr(tx)); return;
       // figc4.7 Invoke_Retransmission body. `X := V(s)` snapshots the send
       // variable so the do-while loop knows where to stop; `V(s) := N(r)`
       // rewinds the send variable to the peer's N(r) so the loop re-emits from
@@ -687,7 +689,7 @@ export class ActionDispatcher {
         if (!trigger.frame) return;
         const nr = getNr(trigger.frame);
         if (ctx.peerReceiverBusy) {
-          ctx.va = nr;
+          advanceVa(ctx, nr);
           sched.cancel("T3");
           if (!sched.isRunning("T1")) {
             sched.arm("T1", ctx.t1vMs, () => this.onTimerExpiry("T1"));
@@ -695,7 +697,7 @@ export class ActionDispatcher {
           return;
         }
         if (nr === ctx.vs) {
-          ctx.va = nr;
+          advanceVa(ctx, nr);
           ctx.t1RemainingWhenLastStoppedMs = sched.timeRemainingMs("T1");
           sched.cancel("T1");
           sched.arm("T3", this.t3Ms, () => this.onTimerExpiry("T3"));
@@ -706,7 +708,7 @@ export class ActionDispatcher {
           return;
         }
         // Partial ack with progress.
-        ctx.va = nr;
+        advanceVa(ctx, nr);
         sched.arm("T1", ctx.t1vMs, () => this.onTimerExpiry("T1"));
         return;
       }
@@ -884,6 +886,11 @@ function emitIFrame(tx: TransitionContext): void {
   });
   tx.sendFrame(frame);
   ctx.sentIFrames.set(ns, { data: tx.event.data, pid: tx.event.pid ?? 0xf0 });
+  // A freshly transmitted frame at this N(S) is genuinely new data, so any stale
+  // "already selectively retransmitted" mark from a prior ring cycle must not
+  // suppress a future SREJ-driven replay of THIS frame. Mirrors the C#
+  // EmitIFrame's SelectivelyRetransmittedSinceAck.Remove(ns).
+  ctx.selectivelyRetransmittedSinceAck.delete(ns);
 }
 
 function pushOnIFrameQueue(tx: TransitionContext): void {
@@ -899,14 +906,37 @@ function pushOnIFrameQueue(tx: TransitionContext): void {
 }
 
 /**
+ * Advance V(a) to `newVa`, and — when that is genuine acknowledgement progress
+ * (V(a) actually moved) — open a new recovery cycle: clear the per-cycle
+ * selective-retransmit set so a frame may be selectively retransmitted again if
+ * re-requested, and prune the now-acked entries out of {@link
+ * Ax25SessionContext.sentIFrames}. Routing every V(a) advance through here keeps
+ * a later stale/duplicate REJ/SREJ from replaying an already-acked frame (the
+ * mod-8 SREJ ring-wrap duplicate; M0LTE/packet.net#285) — direwolf deletes each
+ * acknowledged `txdata_by_ns[ns]` at the same point (ax25_link.c). Mirrors the
+ * C# `Ax25ActionVerb.VAAssignNR` arm.
+ */
+function advanceVa(ctx: Ax25SessionContext, newVa: number): void {
+  const previousVa = ctx.va;
+  ctx.va = newVa;
+  if (ctx.va !== previousVa) {
+    ctx.selectivelyRetransmittedSinceAck.clear();
+    pruneAcknowledgedSentIFrames(ctx);
+  }
+}
+
+/**
  * Implements `Push Old I Frame N(r) on Queue` (figc4.4's selective SREJ/REJ
  * retransmit): re-send the previously-sent I-frame whose N(S) equals the
  * incoming frame's N(R). Emits directly via {@link emitOldIFrame} — see the
  * note there for why a retransmit must NOT be routed through the fresh-frame
- * queue. Also the figc4.4/figc4.5 SREJ-quirk redirect target.
+ * queue. Also the figc4.4/figc4.5 SREJ-quirk redirect target. This is the
+ * SELECTIVE replay path, so it gates on the live send window + once-per-cycle
+ * (see {@link emitOldIFrame}); the go-back-N `Invoke_Retransmission` body
+ * (`Push Old I Frame onto Queue`) is the unguarded path.
  */
 function pushOldIFrameNrOnQueue(tx: TransitionContext): void {
-  emitOldIFrame(tx, extractNr(tx));
+  emitOldIFrame(tx, extractNr(tx), true);
 }
 
 /**
@@ -923,14 +953,39 @@ function pushOldIFrameNrOnQueue(tx: TransitionContext): void {
  * gap never fills (the figure assumes push + transmit interleave; the runtime
  * decoupled them into push-now / drain-later, losing the N(s) semantics). This
  * is M0LTE/packet.net#231; the fix mirrors `ActionDispatcher.EmitOldIFrame`
- * (PR M0LTE/packet.net#232). Retransmits also go out unconditionally — they are
- * already-counted frames being replayed, not new transmissions subject to the
- * send window. N(s) is the supplied original sequence; N(r) piggybacks the
- * current V(r); P=0 (the poll, when needed, is a separate enquiry). Silently
- * skips if the frame has been evicted from storage — matches linbpq/direwolf.
+ * (PR M0LTE/packet.net#232). N(s) is the supplied original sequence; N(r)
+ * piggybacks the current V(r); P=0 (the poll, when needed, is a separate
+ * enquiry). Silently skips if the frame has been evicted from storage — matches
+ * linbpq/direwolf.
+ *
+ * For the SREJ-driven SELECTIVE replay (`selectiveReplay = true`) only an
+ * *outstanding* frame (N(S) ∈ [V(a), V(s))) is re-sent, and at most once per
+ * recovery cycle. A REJ/SREJ that names an already-acknowledged N(S) — a stale
+ * or duplicated supervisory frame arriving after V(a) has moved past it, or a
+ * redundant SREJ for a frame already in flight — must NOT cause a resend: that
+ * copy becomes a duplicate once the peer's V(R) has wrapped around the ring and
+ * is then mis-delivered as new data (the mod-8 SREJ ring-wrap bug;
+ * M0LTE/packet.net#285). direwolf deletes each `txdata_by_ns[ns]` on
+ * acknowledgement (and de-duplicates SREJ requests) for the same reason. The
+ * go-back-N `Invoke_Retransmission` replay (`selectiveReplay = false`, the
+ * default) is exempt: it deliberately rewinds V(s) and re-sends the whole
+ * outstanding tail, so the live-window and once-per-cycle tests don't apply.
+ * Mirrors the C# `ActionDispatcher.EmitOldIFrame(tx, ns, selectiveReplay)`.
  */
-function emitOldIFrame(tx: TransitionContext, ns: number): void {
+function emitOldIFrame(
+  tx: TransitionContext,
+  ns: number,
+  selectiveReplay = false,
+): void {
   const ctx = tx.context;
+  // SREJ selective replay only: re-send an outstanding frame at most once per
+  // recovery cycle, so a stale/duplicate/redundant SREJ can't put a copy on the
+  // wire that the peer mis-delivers after its V(R) wraps. See the doc comment.
+  if (selectiveReplay) {
+    if (!isOutstanding(ctx, ns)) return;
+    if (ctx.selectivelyRetransmittedSinceAck.has(ns)) return;
+    ctx.selectivelyRetransmittedSinceAck.add(ns);
+  }
   const entry = ctx.sentIFrames.get(ns);
   if (!entry) return;
   tx.sendFrame(

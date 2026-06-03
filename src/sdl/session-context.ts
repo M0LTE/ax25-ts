@@ -126,6 +126,23 @@ export interface Ax25SessionContext {
 
   /** Out-of-sequence received I-frames keyed by N(S). */
   storedReceivedIFrames: Map<number, { info: Uint8Array; pid: number }>;
+
+  /**
+   * N(S) values that have already been selectively retransmitted (in response
+   * to an SREJ) since V(a) last advanced — i.e. within the current recovery
+   * cycle. A burst of redundant SREJs for the same still-outstanding gap (the
+   * figc4.4 over-SREJ: one SREJ per out-of-sequence frame) must not spawn one
+   * wire copy each — the surplus copies become stale once the receiver's V(R)
+   * wraps past them and get mis-delivered as new (the mod-8 SREJ ring-wrap
+   * duplicate; M0LTE/packet.net#285). Cleared on every V(a) advance (genuine
+   * progress = new cycle, see {@link pruneAcknowledgedSentIFrames}) and per-N(S)
+   * when a fresh I-frame is emitted at that N(S). A genuinely lost retransmit is
+   * still recovered — via the T1/TimerRecovery `Invoke_Retransmission` path,
+   * which does not consult this set. direwolf reaches the same effect by
+   * deleting acknowledged `txdata_by_ns[ns]` + de-duplicating SREJ requests
+   * (ax25_link.c). Mirrors the C# `Ax25SessionContext.SelectivelyRetransmittedSinceAck`.
+   */
+  selectivelyRetransmittedSinceAck: Set<number>;
 }
 
 /** Modulus used for sequence-variable arithmetic (8 or 128). */
@@ -140,6 +157,37 @@ export function incrementSeq(ctx: Ax25SessionContext, value: number): number {
 
 export function decrementSeq(ctx: Ax25SessionContext, value: number): number {
   return (value + modulus(ctx) - 1) % modulus(ctx);
+}
+
+/**
+ * True if `ns` is an *outstanding* (sent-but-not-yet-acknowledged) send sequence
+ * number — i.e. it lies in the half-open window `[V(a), V(s))` in mod-N
+ * arithmetic. A frame whose N(S) is outside this window has already been
+ * acknowledged (behind V(a)) or was never sent (at/after V(s)); replaying it
+ * during recovery would put a stale sequence number on the wire that the peer
+ * can mis-deliver once its V(R) has wrapped past it (the mod-8 SREJ ring-wrap
+ * duplicate; M0LTE/packet.net#285). Mirrors the C# `Ax25SessionContext.IsOutstanding`.
+ */
+export function isOutstanding(ctx: Ax25SessionContext, ns: number): boolean {
+  const m = modulus(ctx);
+  const span = (ctx.vs - ctx.va + m) % m; // count of outstanding frames
+  const offset = (ns - ctx.va + m) % m; // position of ns within the window
+  return offset < span;
+}
+
+/**
+ * Drop every entry in {@link Ax25SessionContext.sentIFrames} whose N(S) is no
+ * longer outstanding (i.e. has been acknowledged — it now lies behind V(a) per
+ * {@link isOutstanding}). Called whenever V(a) advances so a stale or duplicate
+ * REJ/SREJ cannot make the recovery path replay an already-acked frame. Mirrors
+ * direwolf's `cdata_delete(txdata_by_ns[...])` on acknowledgement (ax25_link.c),
+ * and the C# `Ax25SessionContext.PruneAcknowledgedSentIFrames`.
+ */
+export function pruneAcknowledgedSentIFrames(ctx: Ax25SessionContext): void {
+  if (ctx.sentIFrames.size === 0) return;
+  for (const ns of [...ctx.sentIFrames.keys()]) {
+    if (!isOutstanding(ctx, ns)) ctx.sentIFrames.delete(ns);
+  }
 }
 
 /** Build a fresh session context for a `(local, remote)` pair. */
@@ -180,6 +228,7 @@ export function createSessionContext(
     iFrameQueue: [],
     sentIFrames: new Map(),
     storedReceivedIFrames: new Map(),
+    selectivelyRetransmittedSinceAck: new Set(),
   };
 }
 
@@ -202,4 +251,5 @@ export function resetState(ctx: Ax25SessionContext): void {
   ctx.iFrameQueue.length = 0;
   ctx.sentIFrames.clear();
   ctx.storedReceivedIFrames.clear();
+  ctx.selectivelyRetransmittedSinceAck.clear();
 }
