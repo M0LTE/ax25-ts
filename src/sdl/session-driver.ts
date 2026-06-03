@@ -381,6 +381,13 @@ export class SdlSessionDriver {
   }
 
   private canTransmitIFrame(): boolean {
+    // Only drain the I-frame queue onto the wire from a connected state. Without
+    // this gate, data submitted while still establishing (AwaitingConnection /
+    // AwaitingV22Connection — figc4.3 t09 buffer-while-connecting) gets popped by
+    // the post-dispatch drain and routed into `push_frame_on_queue`, which has no
+    // DL_DATA_request trigger to read and throws. Mirrors C# Ax25Session.CanTransmitIFrame
+    // (packet.net#263). Data submitted pre-connect stays buffered until Connected.
+    if (this.state !== "Connected" && this.state !== "TimerRecovery") return false;
     if (this.context.peerReceiverBusy) return false;
     const m = ctxModulus(this.context);
     const outstanding =
