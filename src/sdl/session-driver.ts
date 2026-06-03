@@ -1,4 +1,5 @@
 import {
+  type Ax25Guard,
   DataLinkAwaitingConnection,
   DataLinkAwaitingV22Connection,
   DataLinkAwaitingRelease,
@@ -113,7 +114,7 @@ export interface SessionDriverHooks {
    * C# `Ax25ManagementDataLink` adding `RC_eq_NM201` over the default binding
    * table.
    */
-  readonly extraBindings?: ReadonlyMap<string, () => boolean>;
+  readonly extraBindings?: ReadonlyMap<Ax25Guard, () => boolean>;
   /**
    * TM201 (management retry timer) duration in ms. Only the MDL driver sets it;
    * defaults to the dispatcher's 3000 ms. See {@link ActionDispatcher.tm201Ms}.
@@ -166,7 +167,7 @@ export class SdlSessionDriver {
     this.statePages = statePages;
     this.subroutines = hooks.subroutines ?? new DefaultSubroutineRegistry();
 
-    const bindings = new Map(
+    const bindings = new Map<Ax25Guard, () => boolean>(
       createSessionBindings(context, scheduler, () => this.currentTrigger),
     );
     // Merge any caller-supplied extra bindings (the MDL driver's RC_eq_NM201).

@@ -67,12 +67,13 @@ function runLoop(
 ): void {
   const body = actions.slice(loop.start, loop.start + loop.length);
   let iterations = 0;
-  const shouldContinue = (): boolean => guards.evaluate(loop.predicate);
+  const shouldContinue = (): boolean => guards.evaluateTerm(loop.predicate);
+  const predicateLabel = `${loop.predicate.negate ? "not " : ""}${loop.predicate.atom}`;
   const runBody = (): void => {
     dispatcher.execute(body, tx, stateLabel);
     if (++iterations > MAX_LOOP_ITERATIONS) {
       throw new Error(
-        `SDL loop (predicate '${loop.predicate}') exceeded ${MAX_LOOP_ITERATIONS} ` +
+        `SDL loop (predicate '${predicateLabel}') exceeded ${MAX_LOOP_ITERATIONS} ` +
           `iterations without its continue predicate clearing`,
       );
     }

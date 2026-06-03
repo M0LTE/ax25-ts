@@ -1,3 +1,4 @@
+import type { Ax25Guard } from "ax25sdl";
 import { describe, expect, it } from "vitest";
 import { Callsign } from "../src/callsign.js";
 import type { Ax25Frame } from "../src/frame.js";
@@ -109,19 +110,21 @@ describe("SDL driver — unbound predicate", () => {
     );
     const sched = new RealTimerScheduler();
     const bindings = createSessionBindings(ctx, sched, () => null);
-    // Strip the binding to make it unbound.
+    // Strip the binding to make it unbound. (In normal operation the typed
+    // Ax25Guard-keyed map is exhaustive by construction, so this can't happen —
+    // but the evaluator still throws defensively, matching the C# walker's
+    // GuardEvaluationException it catches.)
     const stripped = new Map(bindings);
     stripped.delete("layer_3_initiated");
     const evaluator = new GuardEvaluator(stripped);
-    expect(() => evaluator.evaluate("F_eq_1 and layer_3_initiated")).toThrow(
-      GuardEvaluationError,
-    );
-    expect(() => evaluator.evaluate("F_eq_1 and layer_3_initiated")).toThrow(
-      /unbound identifier 'layer_3_initiated'/,
+    const guard = [{ atom: "layer_3_initiated", negate: false }] as const;
+    expect(() => evaluator.evaluate(guard)).toThrow(GuardEvaluationError);
+    expect(() => evaluator.evaluate(guard)).toThrow(
+      /unbound guard atom 'layer_3_initiated'/,
     );
   });
 
-  it("treats empty / whitespace guards as true (no guard)", () => {
+  it("treats empty / null / undefined guards as true (no guard)", () => {
     const ctx = createSessionContext(
       Callsign.parse("A"),
       Callsign.parse("B"),
@@ -130,8 +133,7 @@ describe("SDL driver — unbound predicate", () => {
     const evaluator = new GuardEvaluator(
       createSessionBindings(ctx, sched, () => null),
     );
-    expect(evaluator.evaluate("")).toBe(true);
-    expect(evaluator.evaluate("   ")).toBe(true);
+    expect(evaluator.evaluate([])).toBe(true);
     expect(evaluator.evaluate(null)).toBe(true);
     expect(evaluator.evaluate(undefined)).toBe(true);
   });
@@ -180,39 +182,65 @@ describe("SDL driver — unknown action verb", () => {
   });
 });
 
-describe("SDL driver — guard evaluator grammar", () => {
-  it("evaluates 'and'-chained predicates", () => {
-    const bindings = new Map<string, () => boolean>([
-      ["a", () => true],
-      ["b", () => true],
-      ["c", () => false],
-    ]);
-    const e = new GuardEvaluator(bindings);
-    expect(e.evaluate("a and b")).toBe(true);
-    expect(e.evaluate("a and c")).toBe(false);
-    expect(e.evaluate("a and b and c")).toBe(false);
+describe("SDL driver — guard evaluator (typed GuardTerm conjunction)", () => {
+  // `a` = true, `b` = true, `c` = false — using real Ax25Guard atoms as stubs
+  // so the typed bindings map typechecks.
+  const stubBindings = new Map<Ax25Guard, () => boolean>([
+    ["P_eq_1", () => true], // a
+    ["F_eq_1", () => true], // b
+    ["command", () => false], // c
+  ]);
+
+  it("ANDs the terms of a conjunction", () => {
+    const e = new GuardEvaluator(stubBindings);
+    expect(
+      e.evaluate([
+        { atom: "P_eq_1", negate: false },
+        { atom: "F_eq_1", negate: false },
+      ]),
+    ).toBe(true);
+    expect(
+      e.evaluate([
+        { atom: "P_eq_1", negate: false },
+        { atom: "command", negate: false },
+      ]),
+    ).toBe(false);
+    expect(
+      e.evaluate([
+        { atom: "P_eq_1", negate: false },
+        { atom: "F_eq_1", negate: false },
+        { atom: "command", negate: false },
+      ]),
+    ).toBe(false);
   });
 
-  it("evaluates 'or'-chained predicates", () => {
-    const bindings = new Map<string, () => boolean>([
-      ["a", () => true],
-      ["b", () => false],
-    ]);
-    const e = new GuardEvaluator(bindings);
-    expect(e.evaluate("a or b")).toBe(true);
-    expect(e.evaluate("b or b")).toBe(false);
+  it("applies a term's negate flag", () => {
+    const e = new GuardEvaluator(stubBindings);
+    // not a (a=true) → false
+    expect(e.evaluate([{ atom: "P_eq_1", negate: true }])).toBe(false);
+    // not c (c=false) → true
+    expect(e.evaluate([{ atom: "command", negate: true }])).toBe(true);
+    // not a and b → false
+    expect(
+      e.evaluate([
+        { atom: "P_eq_1", negate: true },
+        { atom: "F_eq_1", negate: false },
+      ]),
+    ).toBe(false);
+    // a and not c → true
+    expect(
+      e.evaluate([
+        { atom: "P_eq_1", negate: false },
+        { atom: "command", negate: true },
+      ]),
+    ).toBe(true);
   });
 
-  it("respects 'not' prefix", () => {
-    const bindings = new Map<string, () => boolean>([
-      ["a", () => true],
-      ["b", () => false],
-    ]);
-    const e = new GuardEvaluator(bindings);
-    expect(e.evaluate("not a")).toBe(false);
-    expect(e.evaluate("not b")).toBe(true);
-    expect(e.evaluate("not a and b")).toBe(false);
-    expect(e.evaluate("a and not b")).toBe(true);
+  it("evaluates a single term via evaluateTerm (loop predicate)", () => {
+    const e = new GuardEvaluator(stubBindings);
+    expect(e.evaluateTerm({ atom: "P_eq_1", negate: false })).toBe(true);
+    expect(e.evaluateTerm({ atom: "P_eq_1", negate: true })).toBe(false);
+    expect(e.evaluateTerm({ atom: "command", negate: true })).toBe(true);
   });
 });
 
@@ -227,10 +255,10 @@ describe("SDL driver — bindings dictionary", () => {
     ctx.va = 3;
     const sched = new RealTimerScheduler();
     const bindings = createSessionBindings(ctx, sched, () => null);
-    expect(bindings.get("acknowledge_pending")!()).toBe(true);
-    expect(bindings.get("V_s_eq_V_a")!()).toBe(true);
+    expect(bindings.get("ack_pending")!()).toBe(true);
+    expect(bindings.get("vs_eq_va")!()).toBe(true);
     ctx.vs = 4;
-    expect(bindings.get("V_s_eq_V_a")!()).toBe(false);
+    expect(bindings.get("vs_eq_va")!()).toBe(false);
   });
 
   it("binds timer-running predicates against the scheduler", () => {
