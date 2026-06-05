@@ -11,6 +11,34 @@
  * listener-under-test (once per peer), and the cached sessions are
  * distinct.
  *
+ * **Tier 3 — modem/channel-dependent, kept on net-sim (docs/plan.md §7.0).**
+ * Unlike the connected-mode / NODES-ingest protocol tests, this one does NOT
+ * shift left onto AXUDP. The *demux assertion itself* (distinct cached sessions
+ * keyed by source callsign, frames routed to the right session) is already
+ * covered deterministically in-process at Tier 1 (`Ax25ListenerMultiPeerTests`,
+ * mirrored TS-side in the unit suite). What this interop test uniquely adds is
+ * the **multiple-stations-on-one-shared-half-duplex-channel** reality: two peer
+ * stations transmit toward one listener over net-sim's single FM-capture
+ * AFSK1200 bus (`collision_mode: silence` — concurrent TX silences both), and
+ * the listener must demux them off that contended channel — including the
+ * second test, where an inbound accept and an outbound dial contend for the one
+ * half-duplex channel at once. AXUDP's transport is strictly point-to-point
+ * (one fixed UDP remote, no third-party / broadcast delivery; see
+ * `src/axudp-transport.ts`), so it *cannot* reproduce a multi-station shared
+ * channel — an AXUDP variant would add zero coverage over the Tier-1 demux
+ * tests while needing either the (already-skipped, #153) BPQ-originates-inbound
+ * path or BPQ L2-bridging between AXIP MAPs (which would change the subject from
+ * L2 demux to NET/ROM routing). So this legitimately STAYS Tier 3.
+ *
+ * Being Tier 3, it rides net-sim's load-sensitive software modem and is subject
+ * to the §7.1 "environmentally flaky, non-blocking, re-run a lone red in
+ * isolation" caveat (a CPU glitch / shared-channel contention from a sibling
+ * net-sim test → a slow demod → a slow handshake). The `waitUntil` budgets
+ * below are sized to match the C# sibling's proven Tier-3 budgets (30 s) so the
+ * contended-channel case has margin; `waitUntil` returns as soon as the
+ * predicate holds, so a generous budget costs nothing on a quiet host (where
+ * each leg settles in a few seconds).
+ *
  * Bring the stack up first:
  *
  *   docker compose -f docker/compose.interop.yml up -d --wait
@@ -33,6 +61,16 @@ import { TcpKissTransport } from "../../src/tcp-transport.js";
 const HOST = "127.0.0.1";
 const LISTENER_PORT = 8100;
 const PEER_PORT = 8101;
+
+// Tier-3 budgets, matched to the C# sibling `NetsimListenerMultiPeerScenarios`
+// (30 s connect / 30 s disconnect). The earlier 10 s / 20 s budgets were too
+// tight for the contended shared-AFSK channel (a sibling net-sim test +
+// CPU load can push a single handshake past 20 s — the #312 line-217 flake).
+// `waitUntil` returns as soon as the predicate holds, so the headroom is free
+// on a quiet host. The per-test `it` budget below is raised to be a superset of
+// the summed sub-budgets.
+const STATE_SETTLE_BUDGET_MS = 30_000; // listener-side reaches Connected
+const DISCONNECT_BUDGET_MS = 30_000; // session returns to Disconnected
 
 async function netsimReachable(): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
@@ -123,23 +161,26 @@ describe.skipIf(!stackReachable)(
         const sessionFromPeer1 = await peer1Listener.connect(listenerCall);
         expect(sessionFromPeer1.state).toBe("Connected");
         const listenerSidePeer1 = await acceptedFromPeer1Promise;
-        await waitUntil(() => listenerSidePeer1.state === "Connected", 10_000);
+        await waitUntil(() => listenerSidePeer1.state === "Connected", STATE_SETTLE_BUDGET_MS);
 
         // ─── Peer 2 connects ────────────────────────────────────────
         const sessionFromPeer2 = await peer2Listener.connect(listenerCall);
         expect(sessionFromPeer2.state).toBe("Connected");
         const listenerSidePeer2 = await acceptedFromPeer2Promise;
-        await waitUntil(() => listenerSidePeer2.state === "Connected", 10_000);
+        await waitUntil(() => listenerSidePeer2.state === "Connected", STATE_SETTLE_BUDGET_MS);
 
         expect(listenerSidePeer1).not.toBe(listenerSidePeer2);
 
         // ─── Clean disconnect on both ───────────────────────────────
         sessionFromPeer1.postEvent({ name: "DL_DISCONNECT_request" });
         sessionFromPeer2.postEvent({ name: "DL_DISCONNECT_request" });
-        await waitUntil(() => sessionFromPeer1.state === "Disconnected", 20_000);
-        await waitUntil(() => sessionFromPeer2.state === "Disconnected", 20_000);
+        await waitUntil(() => sessionFromPeer1.state === "Disconnected", DISCONNECT_BUDGET_MS);
+        await waitUntil(() => sessionFromPeer2.state === "Disconnected", DISCONNECT_BUDGET_MS);
       },
-      90_000,
+      // Superset of the summed 30 s waitUntil sub-budgets above (cf. the C#
+      // sibling's ~105 s overall). Only the pathological contended case
+      // approaches it; a quiet run finishes in well under 15 s.
+      120_000,
     );
 
     it(
@@ -192,7 +233,7 @@ describe.skipIf(!stackReachable)(
 
         expect(outboundSession.state).toBe("Connected");
         expect(inboundSession.state).toBe("Connected");
-        await waitUntil(() => listenerSideInbound.state === "Connected", 10_000);
+        await waitUntil(() => listenerSideInbound.state === "Connected", STATE_SETTLE_BUDGET_MS);
 
         // Cached sessions on the listener-under-test must be distinct.
         expect(outboundSession).not.toBe(listenerSideInbound);
@@ -200,10 +241,13 @@ describe.skipIf(!stackReachable)(
         // Clean teardown.
         outboundSession.postEvent({ name: "DL_DISCONNECT_request" });
         inboundSession.postEvent({ name: "DL_DISCONNECT_request" });
-        await waitUntil(() => outboundSession.state === "Disconnected", 20_000);
-        await waitUntil(() => inboundSession.state === "Disconnected", 20_000);
+        await waitUntil(() => outboundSession.state === "Disconnected", DISCONNECT_BUDGET_MS);
+        await waitUntil(() => inboundSession.state === "Disconnected", DISCONNECT_BUDGET_MS);
       },
-      90_000,
+      // Superset of the summed 30 s waitUntil sub-budgets above (cf. the C#
+      // sibling's ~105 s overall). Only the pathological contended case
+      // approaches it; a quiet run finishes in well under 15 s.
+      120_000,
     );
   },
 );
