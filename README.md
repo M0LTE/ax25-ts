@@ -85,18 +85,36 @@ Per-peer sessions are cached, surviving disconnect — sequence-variable history
 
 ## Transports
 
-`Ax25Stack` accepts any `Ax25Transport` (a 3-method interface: `start` / `send` / `stop`). The library ships three concrete transports plus a documented "implement-your-own" seam:
+`Ax25Stack` accepts any `Ax25Transport` (a 3-method interface: `start` / `send` / `stop`). The library ships four concrete transports plus a documented "implement-your-own" seam:
 
 | Transport | Where | Environment | Status |
 | --- | --- | --- | --- |
 | `WebSerialKissTransport` | main entry | Chromium browsers (Chrome / Edge / Opera / Brave) | ✓ |
 | `TcpKissTransport` | `/tcp-transport` subpath | Node.js | ✓ |
+| `AxudpTransport` | `/axudp-transport` subpath | Node.js | ✓ |
 | `MockTransport` | `tests/mock-transport.ts` | Anywhere (test-only) | ✓ |
 | AGW (over TCP) | — | Node | not implemented |
-| AXUDP | — | Node | not implemented |
 | Audio (browser AFSK) | — | Browser | not implemented |
 
 To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTransport)`.
+
+### AXUDP (BPQAXIP-over-UDP)
+
+`AxudpTransport` carries AX.25 frames over UDP to a real AXIP/AXUDP peer — LinBPQ's BPQAXIP driver, XRouter, ax25ipd, JNOS — the RFC-1226 "AX.25 over IP" convention. It's the Node analog of `TcpKissTransport`, plugging into the exact same `Ax25Transport` seam, so the listener + the NET/ROM module run over it identically:
+
+```ts
+import { AxudpTransport } from "@packet-net/ax25/axudp-transport";
+
+// Send every frame to the peer at host:port; bind a local UDP port for
+// receive (a fixed one if the peer dials us by a known port, e.g. a BPQAXIP
+// MAP entry; 0 picks an ephemeral port). Binds all interfaces by default.
+const transport = new AxudpTransport("127.0.0.1", 8093, { localPort: 8190 });
+const stack = new Ax25Stack(transport);
+await stack.start();
+const session = await stack.connect({ from: "M0LTE-2", to: "GB7CIP" });
+```
+
+AXUDP is **not** KISS — there's no SLIP framing, command byte, or CSMA. A datagram's payload *is* the AX.25 frame body (the KISS-form octets the listener produces) followed by the **2-octet AX.25 FCS** (CRC-16/X.25, low byte first). **The FCS is unconditional — there is no FCS-less mode.** Every real AXIP/AXUDP implementation mandates it (RFC 1226 + ax25ipd + BPQAXIP + XRouter + JNOS), so `AxudpTransport` always appends it on send and strips + validates it on receive (dropping any datagram with a bad FCS, exactly as a real peer does). Stripping is mandatory not cosmetic: the AX.25 parser rejects an S-frame (RR/RNR/REJ ack) carrying a trailing FCS tail. AXUDP is point-to-point — every outbound frame goes to the one configured remote (a frame for a third station is still sent there; the peer's AX.25 layer ignores it by address), the same as pointing a serial KISS link at one modem.
 
 ## Scope — what's in, what's out
 
@@ -105,7 +123,7 @@ To roll your own, implement `Ax25Transport` and pass it to `new Ax25Stack(yourTr
 - Frame codec for U/S/I frames in **both modulos**: SABM, SABME, UA, DISC, DM, UI, RR, RNR, REJ, SREJ, I. The extended (mod-128) 2-octet control field on I and S frames is wired — 7-bit N(S)/N(R) + mode-aware P/F (Fig 4.1b), with the receive path threading the session's negotiated modulo (v2.2 arc V1, parity with [`m0lte/packet.net#266`](https://github.com/m0lte/packet.net/pull/266)). U frames stay 1 octet in both modes.
 - 7-octet callsign codec with SSID + C/H + E-bit handling.
 - KISS framing (FEND/FESC/TFEND/TFESC, multi-port nibble).
-- Web Serial transport for the browser, Node TCP for KISS-over-TCP listeners (BPQ / Xrouter / direwolf / net-sim).
+- Web Serial transport for the browser; Node transports for KISS-over-TCP listeners (BPQ / Xrouter / direwolf / net-sim) and AXUDP / BPQAXIP-over-UDP peers (`AxudpTransport`, FCS-always).
 - Table-driven session machine walking the SDL transitions from [`ax25sdl`](https://www.npmjs.com/package/ax25sdl) — same architecture as the C# reference runtime in [`m0lte/packet.net`'s `Packet.Ax25`](https://github.com/m0lte/packet.net/tree/main/src/Packet.Ax25/Session).
 - SABM → UA → Connected, DISC → UA → Disconnected, I-frame TX/RX with V(s)/V(r)/V(a) bookkeeping, T1 retry capped at N2.
 - **Inbound listener** — `Ax25Listener` accepts inbound SABM, fires `sessionAccepted`, caches per-peer sessions with LRU eviction, mirrors AX.25 §C.2 path reversal on responses.
@@ -176,9 +194,11 @@ src/
 ├── callsign.ts                Callsign type
 ├── frame.ts                   Ax25Frame, factories, encode/decode, classify
 ├── kiss.ts                    KISS framing
+├── fcs.ts                     CRC-16/X.25 frame-check sequence (AXUDP wire form)
 ├── transport.ts               Ax25Transport interface
 ├── webserial-transport.ts     KISS over Web Serial
 ├── tcp-transport.ts           KISS over TCP (Node-only)
+├── axudp-transport.ts         AX.25 over UDP / BPQAXIP (Node-only, FCS-always)
 ├── session.ts                 Public Ax25Stack / Ax25Session — outbound facade
 ├── listener.ts                Ax25Listener — inbound-accepting node coordinator
 ├── netrom/                    NET/ROM read-only "node aware" slice (no TX)
