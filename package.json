@@ -13,6 +13,10 @@
     "./tcp-transport": {
       "types": "./dist/tcp-transport.d.ts",
       "default": "./dist/tcp-transport.js"
+    },
+    "./axudp-transport": {
+      "types": "./dist/axudp-transport.d.ts",
+      "default": "./dist/axudp-transport.js"
     }
   },
   "files": [

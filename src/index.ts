@@ -58,7 +58,10 @@
  *     walker — Enquiry_Response / Select_T1 / Invoke_Retransmission /
  *     Transmit_Enquiry now have real bodies)
  *   ✗ Digipeater paths (`via` throws "not implemented")
- *   ✗ TCP/AGW/audio transports — Web Serial only
+ *   ✓ Node transports — KISS-over-TCP (`@packet-net/ax25/tcp-transport`) +
+ *     AXUDP / BPQAXIP-over-UDP (`@packet-net/ax25/axudp-transport`, FCS-always).
+ *     AGW + browser-side AFSK transports are not implemented (Web Serial is the
+ *     only browser transport)
  *   ✓ Inbound connection acceptance via `Ax25Listener` (per-peer
  *     session cache, `sessionAccepted` / `frameTraced` events, LRU
  *     eviction). See README "Listening for inbound connections".
