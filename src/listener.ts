@@ -5,6 +5,7 @@ import {
   decodeFrame,
   encodeFrame,
   isCommand as frameIsCommand,
+  ui,
 } from "./frame.js";
 import type { DataLinkSignal } from "./sdl/action-dispatcher.js";
 import type { Ax25Event } from "./sdl/events.js";
@@ -477,6 +478,51 @@ export class Ax25Listener {
 
     for (const request of cached.segmentation.buildSendRequests(data, pid)) {
       session.postEvent(request);
+    }
+  }
+
+  /**
+   * Send a connectionless UI (unproto) frame on this port's transport — the
+   * send path connected-mode {@link sendData} is not: it bypasses the session
+   * layer entirely. This is what an upper layer uses to transmit
+   * promiscuously-heard broadcasts (NET/ROM NODES routing broadcasts ride a UI
+   * frame: PID 0xCF, AX.25 destination the literal text callsign `NODES`).
+   *
+   * The source callsign is this listener's {@link myCall}; the frame is built
+   * via the strict {@link ui} factory (the outbound construction path stays
+   * spec-faithful, per CLAUDE.md) as a command (C-bit set), and traced as a
+   * `tx` frame *after* the send so the monitor's TX order matches the wire
+   * (mirroring the per-session `sendFrame` ordering).
+   *
+   * Resolves once the transport's `send` resolves (the bytes are accepted by
+   * the transport, not once any peer has heard them — a UI frame is
+   * unacknowledged). Mirrors the C# `Ax25Listener.SendUiAsync`.
+   *
+   * @param destination The UI frame's AX.25 destination (e.g. the literal
+   *   `NODES` callsign for a NET/ROM routing broadcast).
+   * @param info The UI frame's information field.
+   * @param pid The Layer-3 PID. Defaults to `0xF0` (no-layer-3).
+   * @throws Error if the listener has been disposed.
+   */
+  async sendUi(
+    destination: Callsign,
+    info: Uint8Array,
+    pid: number = PID_NO_LAYER_3,
+  ): Promise<void> {
+    if (this.disposed) throw new Error("Ax25Listener has been disposed");
+    const frame = ui({
+      destination,
+      source: this.myCall,
+      info,
+      pid,
+      isCommand: true,
+    });
+    await this.transport.send(encodeFrame(frame));
+    // Trace AFTER the send so the monitor's TX order matches the wire.
+    try {
+      this.traceFrame(frame, "tx");
+    } catch (err) {
+      this.options.onHandlerError(err);
     }
   }
 
