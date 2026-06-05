@@ -293,4 +293,9 @@ export {
   // the node-level service (the read-only tap + public API)
   type NetRomServiceOptions,
   NetRomService,
+  // NODES origination (the TX half): build + emit NODES broadcasts from the
+  // routing table, with an opt-in embedder-driven re-broadcast scheduler.
+  type NetRomUiSender,
+  type NetRomOriginatorOptions,
+  NetRomOriginator,
 } from "./netrom/index.js";

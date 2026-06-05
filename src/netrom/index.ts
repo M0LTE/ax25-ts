@@ -140,3 +140,12 @@ export {
   type NetRomServiceOptions,
   NetRomService,
 } from "./service.js";
+
+export {
+  // NODES-broadcast origination (the TX half — counterpart to the read-only
+  // NetRomService tap): build NODES frames from the routing table + emit them
+  // as UI frames, with an opt-in embedder-driven re-broadcast scheduler.
+  type NetRomUiSender,
+  type NetRomOriginatorOptions,
+  NetRomOriginator,
+} from "./originator.js";

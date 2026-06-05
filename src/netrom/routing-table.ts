@@ -4,6 +4,7 @@ import {
   NETROM_QUALITY_MIN,
   combineQuality,
 } from "./quality.js";
+import type { NodesBroadcastEntry } from "./nodes-broadcast-builder.js";
 import type { NodesBroadcast } from "./nodes-broadcast.js";
 
 /**
@@ -48,6 +49,15 @@ export interface NetRomRoutingOptions {
    */
   obsoleteInitial: number;
   /**
+   * The obsolescence advertise-gate (BPQ's OBSMIN): a route whose obsolescence
+   * has decayed *below* this is still kept + usable but is no longer included in
+   * our outgoing NODES broadcasts ({@link NetRomRoutingTable.buildAdvertisement})
+   * — so a fading route stops being advertised before it is finally purged at 0.
+   * Canonical / BPQ default **4**; a value ≤ 1 advertises every kept route. Only
+   * consulted on the origination (TX) side; ingest never reads it.
+   */
+  obsoleteMinimum: number;
+  /**
    * Maximum routes retained per destination (sorted by quality, best first).
    * Canonical default **3**.
    */
@@ -62,11 +72,12 @@ export interface NetRomRoutingOptions {
   maxDestinations: number;
 }
 
-/** The canonical defaults (OBSINIT 6, default-port quality 192, 3 routes/dest). */
+/** The canonical defaults (OBSINIT 6, OBSMIN 4, default-port quality 192, 3 routes/dest). */
 export const NETROM_ROUTING_DEFAULTS: NetRomRoutingOptions = {
   defaultNeighbourQuality: 192,
   minQuality: 0,
   obsoleteInitial: 6,
+  obsoleteMinimum: 4,
   maxRoutesPerDestination: 3,
   maxDestinations: 1024,
 };
@@ -381,6 +392,74 @@ export class NetRomRoutingTable {
       .sort((a, b) => compareOrdinal(a.neighbour.toString(), b.neighbour.toString()));
 
     return { destinations: dests, neighbours: nbrs, generatedAt: this.now() };
+  }
+
+  /**
+   * Build the destination entries to advertise in *our own* NODES broadcast —
+   * the L3-origination view of the table, the inverse of {@link ingest}. For
+   * each known destination we advertise its best route's quality via its best
+   * next-hop neighbour, gated by `obsoleteMinimum` (OBSMIN): a route whose
+   * obsolescence has decayed below this is still kept + usable but no longer
+   * advertised — it ages out of broadcasts before it is purged. Quality-0 /
+   * loop-guarded routes are never advertised.
+   *
+   * The returned entries are ordered best-quality first (then by destination
+   * callsign for stable framing), ready to hand to `buildNodesBroadcast` and
+   * emit as UI frames. Read-only with respect to the table — building an
+   * advertisement mutates nothing.
+   *
+   * Mirrors `Packet.NetRom.Routing.NetRomRoutingTable.BuildAdvertisement` on the
+   * C# side.
+   *
+   * @param obsoleteMinimum The OBSMIN advertise-gate (routes with obsolescence
+   *   below this are not advertised). Defaults to the table's configured
+   *   {@link NetRomRoutingOptions.obsoleteMinimum}; pass `0` to advertise every
+   *   kept route.
+   * @returns The advertisable entries, best quality first.
+   */
+  buildAdvertisement(
+    obsoleteMinimum: number = this.options.obsoleteMinimum,
+  ): NodesBroadcastEntry[] {
+    const entries: NodesBroadcastEntry[] = [];
+    for (const [destKey, dest] of this.destinations) {
+      const destination = this.callsignByKey.get(destKey)!;
+      // The best route: highest quality, then highest obsolescence (freshest).
+      let best: RouteState | null = null;
+      for (const route of dest.routes.values()) {
+        if (
+          best === null ||
+          route.quality > best.quality ||
+          (route.quality === best.quality &&
+            route.obsolescence > best.obsolescence)
+        ) {
+          best = route;
+        }
+      }
+      if (best === null) {
+        continue;
+      }
+      if (best.quality <= NETROM_QUALITY_MIN) {
+        continue; // never advertise a quality-0 / loop-guarded route
+      }
+      if (best.obsolescence < obsoleteMinimum) {
+        continue; // OBSMIN: decayed below the advertise threshold
+      }
+      entries.push({
+        destination,
+        destinationAlias: dest.alias,
+        bestNeighbour: best.neighbour,
+        quality: best.quality,
+      });
+    }
+
+    // Best quality first; ties broken by destination callsign (ordinal) so the
+    // frame layout is stable / deterministic.
+    entries.sort(
+      (a, b) =>
+        b.quality - a.quality ||
+        compareOrdinal(a.destination.toString(), b.destination.toString()),
+    );
+    return entries;
   }
 
   /** Total destinations currently known. */
