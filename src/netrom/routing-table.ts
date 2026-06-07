@@ -400,6 +400,45 @@ export class NetRomRoutingTable {
   }
 
   /**
+   * React to a neighbour going down — its interlink could not be raised (it did
+   * not answer the connect) or its quality collapsed — by immediately dropping
+   * every route that forwards through it, and the neighbour entry itself. This is
+   * the explicit link-down failover signal: instead of waiting for the
+   * obsolescence {@link sweep} to age the now-dead routes out over the broadcast
+   * interval (during which forwarding / connect-routing would keep choosing a
+   * route that can't carry traffic), the dead routes leave the table at once, so
+   * the very next forward or connect decision fails over to an alternate next hop.
+   * A destination that loses all its routes is removed; it and the neighbour
+   * re-learn naturally from the next NODES broadcast if the neighbour returns.
+   * Idempotent — marking an unknown / already-removed neighbour down is a no-op
+   * returning 0. Mirrors C# `NetRomRoutingTable.MarkNeighbourDown`.
+   *
+   * @returns the number of routes dropped (across all destinations).
+   */
+  markNeighbourDown(neighbour: Callsign): number {
+    const viaKey = neighbour.toString();
+    let dropped = 0;
+    const emptyDestinations: string[] = [];
+
+    for (const [destKey, dest] of this.destinations) {
+      if (dest.routes.delete(viaKey)) {
+        dropped++;
+      }
+      if (dest.routes.size === 0) {
+        emptyDestinations.push(destKey);
+      }
+    }
+
+    for (const dc of emptyDestinations) {
+      this.destinations.delete(dc);
+    }
+
+    this.neighbours.delete(viaKey);
+    this.pruneOrphanNeighbours();
+    return dropped;
+  }
+
+  /**
    * Take an immutable snapshot of the current table — destinations with their
    * best-first routes, and the directly-heard neighbours. Ordering is stable
    * (alias-or-callsign for destinations, callsign for neighbours) so the surfaced
