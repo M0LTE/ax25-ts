@@ -83,6 +83,17 @@ export interface NetRomConnectorOptions {
    * fault can't tear down the pump. Defaults to a no-op.
    */
   onError?: (err: unknown) => void;
+  /**
+   * The link-down failover seam: called with a neighbour the connector could not
+   * raise an interlink to (it did not answer the connect). The embedder wires this
+   * to the shared routing table's `markNeighbourDown`, so the dead neighbour's
+   * routes leave the table at once and a forward / connect fails over to an
+   * alternate next hop — instead of waiting for the obsolescence sweep. Kept as a
+   * callback (not a direct table mutation) so the connector stays read-only over
+   * the routing view (the focused-objects split). Mirrors the C#
+   * `NetRomService.EnsureInterlinkAsync` dial-failure path. Defaults to a no-op.
+   */
+  onNeighbourDown?: (neighbour: Callsign) => void;
 }
 
 /** Raised by {@link NetRomConnector.connect} when connect-routing is enabled but the
@@ -155,6 +166,7 @@ export class NetRomConnector {
   private readonly maxTimeToLive: number;
   private readonly routing: RoutingSnapshotSource;
   private readonly onError: (err: unknown) => void;
+  private readonly onNeighbourDown: (neighbour: Callsign) => void;
   private readonly circuits: CircuitManager;
 
   // Port id -> attachment (the listener whose interlinks we dial + tap).
@@ -189,6 +201,7 @@ export class NetRomConnector {
     this.forwardMode = options.forwardMode ?? ForwardMode.PerFlow;
     this.maxTimeToLive = options.circuit?.timeToLive ?? DEFAULT_TIME_TO_LIVE;
     this.onError = options.onError ?? (() => {});
+    this.onNeighbourDown = options.onNeighbourDown ?? (() => {});
     this.circuits = new CircuitManager(
       new Callsign("", 0),
       options.circuit,
@@ -360,16 +373,47 @@ export class NetRomConnector {
     if (this.disposed || this.nodeCall === null) {
       throw new Error("NET/ROM connect-routing is not enabled on this node.");
     }
-    const best = destination.bestRoute;
-    if (best === null) {
-      throw new Error(`no usable NET/ROM route to ${destination.destination}.`);
+    const destText = destination.destination.toString();
+
+    // Failover loop: try the best route; if the interlink to its neighbour can't be
+    // raised, ensureInterlink has signalled onNeighbourDown — which (via the embedder)
+    // drops that neighbour's routes — so re-resolve the destination's now-best route
+    // and try again, until one connects or the destination has no routes left. The
+    // link-down failover signal at the connect path; mirrors C# ConnectCircuitAsync.
+    // Bounded by the dwindling route set (each failure removes a route) with a hard
+    // cap as a backstop: 1 + the per-destination route cap (3).
+    const cap = 1 + 3;
+    for (let attempt = 0; attempt < cap; attempt++) {
+      const live = resolveDestination(this.routing.snapshot(), destText);
+      const best = live?.bestRoute ?? null;
+      if (best === null) {
+        throw new Error(`no usable NET/ROM route to ${destText}.`);
+      }
+
+      try {
+        // Ensure the interlink to the best neighbour is up before originating.
+        await this.ensureInterlink(best.neighbour);
+      } catch {
+        // onNeighbourDown already fired; loop to the next-best route. If that was the
+        // last route, the next resolve returns null → the throw above surfaces it.
+        continue;
+      }
+
+      // Interlink up — originate the L4 circuit and await it reaching connected. A
+      // circuit refusal/timeout here is NOT a neighbour-down (the link is fine), so
+      // it surfaces rather than failing over — matching C# ConnectCircuitAsync.
+      return await this.originateCircuit(destination.destination, originatingUser);
     }
 
-    // Ensure the interlink to the best neighbour is up before originating.
-    await this.ensureInterlink(best.neighbour);
+    throw new Error(`no usable NET/ROM route to ${destText} (all next hops are down).`);
+  }
 
-    const circuit = this.circuits.openCircuit(destination.destination);
-    const connection = new NetRomConnection(circuit, destination.destination);
+  private async originateCircuit(
+    destination: Callsign,
+    originatingUser: Callsign,
+  ): Promise<NetRomConnection> {
+    const circuit = this.circuits.openCircuit(destination);
+    const connection = new NetRomConnection(circuit, destination);
 
     // Wire the established / close gate, then drive the connect.
     const established = new Promise<void>((resolve, reject) => {
@@ -377,7 +421,7 @@ export class NetRomConnector {
       circuit.onClosed((reason) =>
         reject(
           new Error(
-            `NET/ROM circuit to ${destination.destination} ${reason.toLowerCase()}.`,
+            `NET/ROM circuit to ${destination} ${reason.toLowerCase()}.`,
           ),
         ),
       );
@@ -449,7 +493,18 @@ export class NetRomConnector {
       throw new Error("no NET/ROM port available to open an interlink.");
     }
 
-    const session = await attachment.listener.connect(neighbour);
+    // A dial that fails (the neighbour never answered the connect) is the link-down
+    // signal: tell the embedder to mark the neighbour down so its now-dead routes
+    // leave the table and the caller (forward / connect failover) re-routes. Only
+    // the dial is guarded — the pre-dial "no port" throw above is a local-config
+    // fault, not a neighbour-down. Mirrors C# EnsureInterlinkAsync.
+    let session: Awaited<ReturnType<NetRomInterlinkListener["connect"]>>;
+    try {
+      session = await attachment.listener.connect(neighbour);
+    } catch (err) {
+      this.onNeighbourDown(neighbour);
+      throw err;
+    }
     // Tap the session for inbound NET/ROM (idempotent — the tap guards itself, so
     // sessionAccepted firing for this dial too is harmless), then record it.
     this.tapInterlinkSession(portId, attachment.listener, session);

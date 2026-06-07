@@ -172,6 +172,42 @@ describe("NetRomRoutingTable — obsolescence", () => {
   });
 });
 
+describe("NetRomRoutingTable — link-down failover (markNeighbourDown)", () => {
+  it("drops a down neighbour's routes at once without waiting for the sweep", () => {
+    const { table } = newTable();
+    table.ingest(NbrA, Me, "vhf", broadcast("RDG", [{ dest: DestSot, destAlias: "SOT", neighbour: NbrA, quality: 200 }]));
+    expect(table.snapshot().destinations.some((d) => d.destination.equals(DestSot))).toBe(true);
+
+    const dropped = table.markNeighbourDown(NbrA);
+
+    expect(dropped).toBeGreaterThan(0);
+    const snap = table.snapshot();
+    expect(snap.destinations).toHaveLength(0); // every route forwarded through the down neighbour
+    expect(snap.neighbours.some((n) => n.neighbour.equals(NbrA))).toBe(false); // the neighbour is removed too
+  });
+
+  it("leaves an alternate route to the same destination (fails over)", () => {
+    const { table } = newTable();
+    table.ingest(NbrA, Me, "vhf", broadcast("RDG", [{ dest: DestSot, destAlias: "SOT", neighbour: NbrA, quality: 250 }]));
+    table.ingest(NbrB, Me, "vhf", broadcast("XYZ", [{ dest: DestSot, destAlias: "SOT", neighbour: NbrB, quality: 150 }]));
+    expect(table.snapshot().destinations.find((d) => d.destination.equals(DestSot))!.bestRoute!.neighbour.equals(NbrA)).toBe(true);
+
+    table.markNeighbourDown(NbrA);
+
+    const after = table.snapshot().destinations.find((d) => d.destination.equals(DestSot))!;
+    expect(after.routes.some((r) => r.neighbour.equals(NbrA))).toBe(false);
+    expect(after.bestRoute!.neighbour.equals(NbrB)).toBe(true); // surviving route is now best — failed over
+  });
+
+  it("is a no-op for an unknown neighbour", () => {
+    const { table } = newTable();
+    table.ingest(NbrA, Me, "vhf", broadcast("RDG", [{ dest: DestSot, destAlias: "SOT", neighbour: NbrA, quality: 200 }]));
+
+    expect(table.markNeighbourDown(NbrB)).toBe(0);
+    expect(table.snapshot().destinations.some((d) => d.destination.equals(DestSot))).toBe(true);
+  });
+});
+
 describe("NetRomRoutingTable — MINQUAL floor", () => {
   it("a route below the floor is dropped by a higher MINQUAL but kept by the default", () => {
     // RDG advertises SOT via XYZ at quality 80 → derived (80*192+128)/256 = 60.

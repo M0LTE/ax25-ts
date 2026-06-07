@@ -19,7 +19,9 @@ import {
   NetRomNoRouteError,
   NetRomRoutingTable,
   parseNodesBroadcast,
+  resolveDestination,
 } from "../../src/netrom/index.js";
+import { Callsign } from "../../src/callsign.js";
 import { waitFor } from "../listener-test-support.js";
 import { buildNodesInfo } from "../netrom-builder.js";
 import {
@@ -181,6 +183,50 @@ describe("NetRomConnector — connect <alias> outbound routing (TS-4)", () => {
     expect(err.target).toBe("GB7XYZ");
     expect(err.message).toContain("GB7XYZ");
     expect(err.name).toBe("NetRomNoRouteError");
+  });
+
+  it("marks a down next hop down and fails over to the alternate route", async () => {
+    // The link-down failover signal at the connect path: when the best next hop's
+    // interlink can't be raised, the connector signals onNeighbourDown (wired to the
+    // table's markNeighbourDown), dropping that route, then fails over to the
+    // destination's next-best route — mirrors C# ConnectCircuitAsync.
+    const nb1 = new Callsign("GB7NB1", 0);
+    const nb2 = new Callsign("GB7NB2", 0);
+    const table = new NetRomRoutingTable();
+    // Two routes to END_NODE: via nb1 (higher quality → best) and via nb2.
+    for (const [nbr, q] of [[nb1, 250], [nb2, 150]] as const) {
+      const bc = parseNodesBroadcast(
+        buildNodesInfo(nbr.toString(), [
+          { dest: END_NODE, destAlias: END_ALIAS, neighbour: nbr, quality: q },
+        ]),
+      );
+      if (bc === null) throw new Error("seed parse failed");
+      table.ingest(nbr, A_NODE, "p1", bc);
+    }
+
+    // A fake interlink listener whose dial always rejects (deterministic — no real
+    // timeout). Record the dial order to prove the failover walked both routes.
+    const dialed: string[] = [];
+    const fakeListener = {
+      connect: (neighbour: Callsign) => {
+        dialed.push(neighbour.toString());
+        return Promise.reject(new Error(`${neighbour} did not answer`));
+      },
+      sendData: () => {},
+      onSessionAccepted: () => {},
+    };
+
+    const connector = new NetRomConnector(
+      { snapshot: () => table.snapshot() },
+      { enabled: true, onNeighbourDown: (n) => table.markNeighbourDown(n) },
+    );
+    connector.attachPort("p1", A_NODE, fakeListener);
+
+    await expect(connector.connect(END_NODE.toString())).rejects.toThrow();
+
+    expect(dialed).toEqual([nb1.toString(), nb2.toString()]); // best first, then failed over
+    expect(resolveDestination(table.snapshot(), END_NODE.toString())).toBeNull(); // both marked down
+    connector.dispose();
   });
 
   it("the connection wraps the circuit as a duplex stream (peerId, completion, closed)", async () => {
