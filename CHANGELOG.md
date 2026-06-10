@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- **Parity with the C# reference at packet.net lib-v0.7.0** ([#55](https://github.com/M0LTE/ax25-ts/pull/55)) — `Ax25ParseOptions` gains `allowEmptyCallsignBase` + `allowCommandFrameAsResponse` (optional, absent = lenient — the historical behaviour; `STRICT_PARSE` now rejects an all-space callsign slot per §3.12 and a response-direction SABM/SABME/DISC per §4.3.3.1 / [packet.net#142](https://github.com/m0lte/packet.net/issues/142) at decode) plus the `BPQ_PARSE` / `XROUTER_PARSE` / `DIREWOLF_PARSE` peer presets. Connectionless **TEST / axping** (§4.3.4.2, [packet.net#348](https://github.com/m0lte/packet.net/pull/348) parity): the listener answers an inbound TEST command with the echoing response (F mirrors P) before any session routing — previously it fell to the Disconnected catch-all and answered **DM** — and absorbs TEST responses; new `test()` frame factory, `"TEST"` `FrameKind`, and `Ax25Listener.sendTest()` probe initiator. `Ax25ListenerOptions` gains `parseOptions` (applied live at the inbound decode + the mod-128 re-parse; a rejected frame is dropped before trace/dispatch — a strict listener is deaf to it end-to-end) and `quirks` (seeded onto each newly-built session), mirroring [packet.net#366](https://github.com/m0lte/packet.net/issues/366). 13 new paired strict-rejects/lenient-accepts tests.
+- **Cross-repo parity drift guard** ([#55](https://github.com/M0LTE/ax25-ts/pull/55)) — `scripts/parity-check.mjs` compares the named-flag / preset / listener-surface inventories against the C# reference and fails CI on any gap not recorded as a reviewed exception in `scripts/parity-exceptions.json`. Runs as the `parity` job here (arm it by adding a fine-grained read-only `PACKETNET_READ_TOKEN` secret — packet.net is private) and as a mirror step in packet.net's `interop.yml` (always armed), so drift fails on whichever side introduces it.
+
+### Changed
+
+- **README refreshed** — a use-case map (web terminal / programmatic connect / accepting inbound / axping / NET/ROM / no-radio testing), the inbound-listener example rewritten to the friendly session facade (`onData` / `write` / `onDisconnected`), a new compatibility-profiles + axping section, a new `examples/web-terminal.ts`, and the long-stale scope table trued up (mod-128 negotiation, FRMR handling, k>1 windowing, and XID/MDL negotiation all shipped during the v2.2 arc and are now listed under "In").
+- **Packaging hygiene** — `repository` / `homepage` / `bugs` metadata for the npm page, `sideEffects: false` (tree-shaking), `engines.node >= 18` (the Node transports), and a `prepublishOnly` guard (typecheck + build + test) so a manual `npm publish` can never ship a stale `dist/`.
+
 ## [0.11.0] — 2026-06-08
 
 ### Added

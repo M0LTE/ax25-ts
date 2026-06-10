@@ -2,6 +2,18 @@
   "name": "@packet-net/ax25",
   "version": "0.11.0",
   "description": "Browser-targeted TypeScript library for AX.25 v2.2 connected-mode sessions over Web Serial KISS modems.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/M0LTE/ax25-ts.git"
+  },
+  "homepage": "https://github.com/M0LTE/ax25-ts#readme",
+  "bugs": {
+    "url": "https://github.com/M0LTE/ax25-ts/issues"
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,6 +37,7 @@
     "README.md"
   ],
   "scripts": {
+    "prepublishOnly": "npm run typecheck && npm run build && npm test",
     "typecheck": "tsc --noEmit",
     "typecheck:examples": "tsc --noEmit --project tsconfig.examples.json",
     "build": "tsc",

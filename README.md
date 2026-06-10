@@ -6,6 +6,18 @@ Browser-targeted TypeScript library for AX.25 v2.2 connected-mode sessions over 
 npm install @packet-net/ax25
 ```
 
+## Find your use case
+
+| I want to… | Read | Worked example |
+| --- | --- | --- |
+| Build a **web terminal** (connect to a BBS/node from a browser, type lines, read replies) | [Quick start](#quick-start-web-serial) | [`examples/web-terminal.ts`](examples/web-terminal.ts) |
+| **Make a connection programmatically** and send/receive data (Node or browser) | [Quick start](#quick-start-web-serial) + [Transports](#transports) | [`examples/quick-start.ts`](examples/quick-start.ts), [`examples/node-tcp.ts`](examples/node-tcp.ts) |
+| **Accept inbound connections** (node/BBS/gateway shape — answer whoever calls in) | [Listening for inbound connections](#listening-for-inbound-connections) | [`examples/inbound-listener.ts`](examples/inbound-listener.ts) |
+| **Ping a station / be pingable** without a connection (axping, AX.25 TEST) | [Compatibility profiles & axping](#compatibility-profiles--axping) | — |
+| Match a port to a **specific neighbour implementation** (BPQ / XRouter / Dire Wolf), or run spec-strict | [Compatibility profiles & axping](#compatibility-profiles--axping) | — |
+| Hear **NET/ROM** routing broadcasts / connect across the network by alias | [Hearing NET/ROM NODES broadcasts](#hearing-netrom-nodes-broadcasts) | [`examples/netrom-aware.ts`](examples/netrom-aware.ts) |
+| Unit-test my app **without a radio** | — | [`examples/with-mock-transport.ts`](examples/with-mock-transport.ts) |
+
 ## Quick start (Web Serial)
 
 A complete browser app — open a USB modem, connect to `GB7CIP`, send a line, receive replies, disconnect:
@@ -58,27 +70,29 @@ const listener = new Ax25Listener(transport, {
 });
 
 listener.onSessionAccepted((session) => {
-  console.log("inbound from", session.context.remote.toString());
+  console.log("inbound from", session.to.toString());
 
-  // Once the session is Connected, the SDL accepts DL_DATA_request:
-  session.postEvent({
-    name: "DL_DATA_request",
-    data: new TextEncoder().encode("Hello!\r"),
-    pid: 0xf0,
+  // The session has the same friendly shape as an outbound Ax25Session —
+  // onData / write / onDisconnected / disconnect:
+  session.onData((chunk) => {
+    process.stdout.write(new TextDecoder().decode(chunk));
   });
+  session.onDisconnected(() => console.log("peer disconnected"));
 
-  // Surface inbound I-frames / disconnects:
-  session.onDataLinkSignal((sig) => {
-    if (sig.type === "DL_DATA_indication") {
-      process.stdout.write(new TextDecoder().decode(sig.data));
-    }
-    if (sig.type === "DL_DISCONNECT_indication" || sig.type === "DL_DISCONNECT_confirm") {
-      console.log("peer disconnected");
-    }
-  });
+  void session.write(new TextEncoder().encode("Welcome to M0LTE-1\r"));
 });
 
 await listener.start();
+```
+
+(The raw SDL-layer API — `postEvent` / `onDataLinkSignal` — stays available on the same session object for consumers that need direct access to DL primitives, XID negotiation, or custom error-recovery flows.)
+
+The listener can also **dial out** on the same transport — `listener.connect(remote)` resolves to a session once the handshake completes, reusing the per-peer cache (SRT/T1V history carries over):
+
+```ts
+const session = await listener.connect("GB7CIP");
+session.onData((chunk) => console.log(new TextDecoder().decode(chunk)));
+await session.write(new TextEncoder().encode("?\r"));
 ```
 
 Per-peer sessions are cached, surviving disconnect — sequence-variable history and SRT/T1V smoothing carry over to the next connect from the same callsign. The cache evicts LRU past `maxCachedPeers` (default 64). Full worked example at [`examples/inbound-listener.ts`](examples/inbound-listener.ts).
@@ -116,6 +130,32 @@ const session = await stack.connect({ from: "M0LTE-2", to: "GB7CIP" });
 
 AXUDP is **not** KISS — there's no SLIP framing, command byte, or CSMA. A datagram's payload *is* the AX.25 frame body (the KISS-form octets the listener produces) followed by the **2-octet AX.25 FCS** (CRC-16/X.25, low byte first). **The FCS is unconditional — there is no FCS-less mode.** Every real AXIP/AXUDP implementation mandates it (RFC 1226 + ax25ipd + BPQAXIP + XRouter + JNOS), so `AxudpTransport` always appends it on send and strips + validates it on receive (dropping any datagram with a bad FCS, exactly as a real peer does). Stripping is mandatory not cosmetic: the AX.25 parser rejects an S-frame (RR/RNR/REJ ack) carrying a trailing FCS tail. AXUDP is point-to-point — every outbound frame goes to the one configured remote (a frame for a third station is still sent there; the peer's AX.25 layer ignores it by address), the same as pointing a serial KISS link at one modem.
 
+## Compatibility profiles & axping
+
+The wire parser is spec-compliant by default with **named, individually-toggleable leniency flags** — the same `Ax25ParseOptions` discipline as the C# reference, kept in lock-step by a CI parity guard (`scripts/parity-check.mjs`). Presets bundle the flags: `LENIENT_PARSE` (the default — accepts every documented real-world quirk: all-space callsign slots from BPQ ID beacons, trailing bytes on supervisory frames, AX.25 v1.x connect frames lacking the v2 command bits), `STRICT_PARSE` (exactly AX.25 v2.2, rejects the rest at decode), and the per-neighbour presets `BPQ_PARSE` / `XROUTER_PARSE` / `DIREWOLF_PARSE`.
+
+A listener takes its profile via `parseOptions` — a frame the options reject is dropped before tracing or dispatch, exactly as if it had failed CRC — and `quirks` selects the SDL session-quirk set for new sessions (`defaultSessionQuirks` = spec-correct; `strictlyFaithfulSessionQuirks` runs the published figures defects-and-all, for conformance study only):
+
+```ts
+const listener = new Ax25Listener(transport, {
+  myCall: "M0LTE-1",
+  parseOptions: STRICT_PARSE, // this port talks to a clean v2.2 peer only
+});
+```
+
+**axping** — connectionless AX.25 TEST (§4.3.4.2) — works both ways with no configuration: an inbound TEST command is answered automatically with an echoing TEST response (never disturbing any session), and `sendTest` probes a remote station; correlate the echo via `onFrameTraced` to measure round-trip time:
+
+```ts
+listener.onFrameTraced(({ frame, direction }) => {
+  if (direction === "rx" && classify(frame) === "TEST") {
+    console.log("echo received — peer is alive");
+  }
+});
+await listener.sendTest(Callsign.parse("GB7CIP"), new TextEncoder().encode("ping 1"));
+```
+
+A peer that doesn't implement TEST simply never answers — a timeout, not an error.
+
 ## Scope — what's in, what's out
 
 ### In
@@ -129,19 +169,22 @@ AXUDP is **not** KISS — there's no SLIP framing, command byte, or CSMA. A data
 - **Inbound listener** — `Ax25Listener` accepts inbound SABM, fires `sessionAccepted`, caches per-peer sessions with LRU eviction, mirrors AX.25 §C.2 path reversal on responses.
 - **figc4.7 subroutine walker** — `Enquiry_Response` / `Select_T1` / `Check_I_Frame_Acknowledged` etc. execute their SDL paths through the dispatcher. With LM-SEIZE granted immediately (contention-free single session), the figc4.4 delayed-ack RR flushes, so connected-mode data transfer **converges** (V(s) → V(a), windows reopen).
 - **Loss recovery (REJ + SREJ)** — timeout-driven go-back-N (`Transmit_Enquiry` → `Invoke_Retransmission`) and single-frame selective reject over a **real SREJ frame on the wire**, with the SREJ recovery quirks (`ax25Spec40` window guard, `ax25Spec41` Karn SRT guard, `ax25Spec42` SREJ-targets-the-gap). The generative loss-recovery conformance suite drives single-drop and bidirectional-burst loss across both modes and asserts convergence (windows empty + complete in-order delivery).
+- **XID / MDL parameter negotiation** — the management-data-link machine (figc5.1/figc5.2) runs the XID exchange after a v2.2 connect; negotiated parameters land on the session context. mod-128 (SABME) establishment, windowed transfer, and loss recovery are wired end-to-end (interop-proven against Dire Wolf).
+- **Connectionless TEST / axping (§4.3.4.2)** — inbound TEST commands answered automatically with the echoing response (F mirrors P, never touching a session); `sendTest()` probes a remote. Parity with the C# listener (packet.net#348).
+- **Compatibility profiles** — `Ax25ParseOptions` named flags (`allowEmptyCallsignBase`, `allowInfoOnSupervisoryFrames`, `allowCommandFrameAsResponse`) with `STRICT_PARSE` / `LENIENT_PARSE` / `BPQ_PARSE` / `XROUTER_PARSE` / `DIREWOLF_PARSE` presets, accepted per-listener (`parseOptions`) alongside per-listener session `quirks`. Kept in lock-step with the C# reference by the CI parity drift guard (`scripts/parity-check.mjs`).
 - **NET/ROM read-only "node aware"** — `NetRomService` taps `Ax25Listener`'s pre-address-filter frame trace to hear NODES routing broadcasts (UI, PID 0xCF, dest `NODES`), parses them (`parseNodesBroadcast`), and maintains a `NetRomRoutingTable` (multiplicative per-hop quality decay, ≤ 3 routes/destination best-first, OBSINIT/obsolescence sweep, trivial-loop guard, MINQUAL floor, table caps) surfaced as an immutable snapshot. Strictly read-only — **no TX, no L4 circuits, no NODES origination** — and hand-written, not SDL-derived (NET/ROM has no SDL figures; BPQ is the de-facto reference, an interop target, not truth). Divergences are named `NetRomParseOptions` flags with `NETROM_PARSE_STRICT` / `Lenient` / `Bpq` / `Xrouter` presets. Parity with [`m0lte/packet.net`'s `Packet.NetRom`](https://github.com/m0lte/packet.net/tree/main/src/Packet.NetRom) ([packet.net#303](https://github.com/m0lte/packet.net/pull/303)). See "Hearing NET/ROM NODES broadcasts" below.
 
 ### Out (deliberate — planned for later)
 
 | Feature | Today | Tracked for |
 | --- | --- | --- |
-| mod-128 connected-mode *negotiation* | The extended frame codec is wired (v2.2 arc V1 — encode/parse 7-bit N(S)/N(R), mode-aware P/F, receive path threads the modulo; an extended link set up with `ctx.isExtended` transfers windowed data and converges). What's left: the driver doesn't yet originate mod-128 on its own — it doesn't flip `isExtended` from an inbound SABME. | v2.2 arc V4 (cf. packet.net#239) |
-| FRMR generation / handling | Inbound FRMR silently dropped | post-v0.1 |
-| Multi-frame TX window (k>1) | Hard-coded k=1 | post-v0.1 |
-| `via` digipeater paths | `stack.connect({ via: [...] })` throws | post-v0.1 |
-| AGW client / server | Not implemented (the [`Packet.Agw`](https://github.com/m0lte/packet.net/tree/main/src/Packet.Agw) .NET package has the working reference impl) | post-v0.1 |
-| Audio modem transport (browser-side AFSK) | Not implemented | post-v0.1 |
-| XID negotiation | Not implemented — defaults used (mod-8); SREJ is supported when `srejEnabled` is set on the session context | post-v0.1 |
+| `via` digipeater paths on *outbound* connects | `stack.connect({ via: [...] })` throws. (Inbound digipeater chains ARE handled — the listener mirrors AX.25 §C.2 path reversal on responses.) | post-v1 |
+| AGW client / server | Not implemented (the [`Packet.Agw`](https://github.com/m0lte/packet.net/tree/main/src/Packet.Agw) .NET package has the working reference impl) | post-v1 |
+| Audio modem transport (browser-side AFSK) | Not implemented | post-v1 |
+| NET/ROM L3 datagram *forwarding* (transit-node relay) | Endpoint roles only (originate + terminate circuits); a transit node relaying third-party circuits is out of scope here as the equivalent was Phase-9 work on the C# side | post-v1 |
+| Listener live parameter reseed | C#'s `UpdateSessionParameters` hot-reconfig — browser consumers reconstruct the listener instead. A reviewed exception in the parity guard. | if a TS host needs it |
+
+(Stale rows removed 2026-06-10 — mod-128 negotiation, FRMR handling, k>1 windowing, and XID/MDL negotiation all shipped during the v2.2 arc; the "In" list above is current.)
 
 ## Hearing NET/ROM NODES broadcasts
 
