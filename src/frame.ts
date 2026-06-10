@@ -86,15 +86,51 @@ export interface Ax25ParseOptions {
    * (FRMR/XID/TEST) and the PID-bearing I/UI frames are unaffected either way.
    */
   readonly allowInfoOnSupervisoryFrames: boolean;
+
+  /**
+   * Accept address slots with an empty callsign base (all six callsign bytes
+   * are `0x40`, i.e. ASCII space shifted left one). Strict §3.12: "the call
+   * sign is made up of upper-case alpha and numeric ASCII characters" — at
+   * least one. Driver: BPQ's `>IS` ID beacons + PD4R-12 QRV broadcasts put
+   * all-space slots on the air. Mirrors C#
+   * `Ax25ParseOptions.AllowEmptyCallsignBase`.
+   *
+   * Optional for source compatibility with pre-existing custom options
+   * objects; an absent value means `true` (lenient — the historical
+   * behaviour, where {@link decodeFrame} always accepted an empty base).
+   * When `false` (strict), {@link decodeFrame} throws on any address slot
+   * (destination, source, or digipeater) whose base is empty.
+   */
+  readonly allowEmptyCallsignBase?: boolean;
+
+  /**
+   * Accept a command-only unnumbered frame (SABM / SABME / DISC) whose
+   * address C-bits do not mark it as a command. Strict §4.3.3.1 / §6.1.2:
+   * SABM, SABME and DISC are *always* commands. Mirrors C#
+   * `Ax25ParseOptions.AllowCommandFrameAsResponse` (packet.net#142).
+   *
+   * Pragmatic: a legacy AX.25 v1.x peer predates the v2.0 command/response
+   * C-bit encoding, so its connect/disconnect frames don't set the v2.2
+   * "command" bits; rejecting them by default would break v1.x interop.
+   *
+   * Optional for source compatibility; an absent value means `true`
+   * (lenient — the historical behaviour). When `false` (strict),
+   * {@link decodeFrame} throws on a response-direction SABM/SABME/DISC, so a
+   * bogus-direction SABM can never open a session.
+   */
+  readonly allowCommandFrameAsResponse?: boolean;
 }
 
 /**
  * Strict AX.25 v2.2 parse — all pragmatic accommodations disabled. Mirrors the
  * C# `Ax25ParseOptions.Strict`. An information field on an S frame or a no-info
- * U frame is rejected at decode ({@link decodeFrame} throws).
+ * U frame, an empty callsign base, or a response-direction SABM/SABME/DISC is
+ * rejected at decode ({@link decodeFrame} throws).
  */
 export const STRICT_PARSE: Ax25ParseOptions = {
   allowInfoOnSupervisoryFrames: false,
+  allowEmptyCallsignBase: false,
+  allowCommandFrameAsResponse: false,
 };
 
 /**
@@ -106,7 +142,29 @@ export const STRICT_PARSE: Ax25ParseOptions = {
  */
 export const LENIENT_PARSE: Ax25ParseOptions = {
   allowInfoOnSupervisoryFrames: true,
+  allowEmptyCallsignBase: true,
+  allowCommandFrameAsResponse: true,
 };
+
+/**
+ * BPQ-flavoured leniency (G8BPQ / LinBPQ). Today the same flag set as
+ * {@link LENIENT_PARSE}; may diverge as BPQ-specific quirks are confirmed.
+ * Mirrors C# `Ax25ParseOptions.Bpq`.
+ */
+export const BPQ_PARSE: Ax25ParseOptions = LENIENT_PARSE;
+
+/**
+ * Xrouter-flavoured leniency. Today the same flag set as {@link STRICT_PARSE}
+ * — no Xrouter-specific quirks observed yet (it grows as the interop matrix
+ * surfaces specific accommodations). Mirrors C# `Ax25ParseOptions.Xrouter`.
+ */
+export const XROUTER_PARSE: Ax25ParseOptions = STRICT_PARSE;
+
+/**
+ * Dire-Wolf-as-AX.25-stack leniency. Today the same flag set as
+ * {@link LENIENT_PARSE}; may diverge. Mirrors C# `Ax25ParseOptions.Direwolf`.
+ */
+export const DIREWOLF_PARSE: Ax25ParseOptions = LENIENT_PARSE;
 
 /**
  * The high-level frame kind, after classification of the (first) control
@@ -130,6 +188,7 @@ export type FrameKind =
   | "I"
   | "FRMR"
   | "XID"
+  | "TEST"
   | "UNKNOWN";
 
 /**
@@ -235,6 +294,8 @@ export function classify(frame: Ax25Frame): FrameKind {
       return "FRMR";
     case CONTROL_XID:
       return "XID";
+    case CONTROL_TEST:
+      return "TEST";
     default:
       return "UNKNOWN";
   }
@@ -406,6 +467,40 @@ export function decodeFrame(
     info = bytes.slice(offset);
   }
 
+  // Strict §3.12 interpretation: a callsign must contain at least one
+  // alpha/numeric character. All-space slots are real on the air (BPQ >IS ID
+  // beacons), so the lenient default accepts them; strict rejects every slot
+  // (destination, source, digipeaters) at decode. Mirrors C#
+  // `Ax25Address.Read` under `AllowEmptyCallsignBase=false`.
+  if (options.allowEmptyCallsignBase === false) {
+    for (const addr of [destination, source, ...digipeaters]) {
+      if (addr.callsign.base.length === 0) {
+        throw new Error(
+          "address slot has empty callsign — allowEmptyCallsignBase is false (§3.12)",
+        );
+      }
+    }
+  }
+
+  // §4.3.3.1 / §6.1.2: SABM, SABME and DISC are ALWAYS commands. A frame
+  // carrying one of those control octets whose address C-bits don't mark it a
+  // command is malformed. Strict rejects it at decode (so a bogus-direction
+  // SABM can never open a session); the lenient default accepts it, since a
+  // legacy AX.25 v1.x peer predates the v2.0 command/response C-bit encoding.
+  // Mirrors the C# `Ax25Frame.TryParse` guard (packet.net#142); see
+  // packet.net docs/strict-vs-pragmatic-audit.md.
+  if (options.allowCommandFrameAsResponse === false && isUFrame) {
+    const cmdBase = control & 0xef;
+    const isCommandOnly =
+      cmdBase === CONTROL_SABM || cmdBase === CONTROL_SABME || cmdBase === CONTROL_DISC;
+    const isCommandFrame = destination.crhBit && !source.crhBit;
+    if (isCommandOnly && !isCommandFrame) {
+      throw new Error(
+        "SABM/SABME/DISC must be a command — allowCommandFrameAsResponse is false (§4.3.3.1)",
+      );
+    }
+  }
+
   return { destination, source, digipeaters, control, controlExtension, pid, info };
 }
 
@@ -566,6 +661,31 @@ export function xid(
   return {
     ...chain,
     control: (CONTROL_XID | (opts.pollFinal ? CONTROL_PF_BIT : 0)) & 0xff,
+    controlExtension: null,
+    pid: null,
+    info,
+  };
+}
+
+/**
+ * Build a TEST frame (§4.3.3.8) — the connectionless "axping" probe / echo.
+ * A TEST *command* (P set by default) solicits a TEST *response* echoing the
+ * information field; the response's F bit mirrors the command's P bit
+ * (§4.3.4.2). Like UI/XID it is a U frame in both modulos. Mirrors the C#
+ * `Ax25Frame.Test` factory.
+ */
+export function test(
+  opts: FrameFactoryOpts & {
+    info: Uint8Array;
+    isCommand: boolean;
+    pollFinal?: boolean;
+  },
+): Ax25Frame {
+  const { destination, source, digipeaters = [], info } = opts;
+  const chain = makeAddressChain(destination, source, digipeaters, opts.isCommand);
+  return {
+    ...chain,
+    control: (CONTROL_TEST | ((opts.pollFinal ?? true) ? CONTROL_PF_BIT : 0)) & 0xff,
     controlExtension: null,
     pid: null,
     info,

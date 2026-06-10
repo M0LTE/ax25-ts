@@ -1,10 +1,15 @@
 import { Callsign } from "./callsign.js";
 import {
   type Ax25Frame,
+  type Ax25ParseOptions,
+  LENIENT_PARSE,
   PID_NO_LAYER_3,
+  classify,
   decodeFrame,
   encodeFrame,
   isCommand as frameIsCommand,
+  pollFinal as framePollFinal,
+  test,
   ui,
 } from "./frame.js";
 import type { DataLinkSignal } from "./sdl/action-dispatcher.js";
@@ -16,6 +21,7 @@ import {
   createSessionContext,
 } from "./sdl/session-context.js";
 import { SdlSessionDriver } from "./sdl/session-driver.js";
+import type { Ax25SessionQuirks } from "./sdl/session-quirks.js";
 import { SegmentationLayer } from "./sdl/segmentation-layer.js";
 import { RealTimerScheduler, type TimerScheduler } from "./sdl/timer-scheduler.js";
 import type { Ax25Transport } from "./transport.js";
@@ -49,6 +55,27 @@ export interface Ax25ListenerOptions {
    * misbehaving / spam-SABM peer from creating unbounded sessions.
    */
   maxCachedPeers?: number;
+  /**
+   * Wire-parse options for this listener's *inbound* frames. If omitted, the
+   * listener uses {@link LENIENT_PARSE} — the historical behaviour. Pass
+   * {@link STRICT_PARSE} for spec-exact acceptance, or a peer preset
+   * ({@link BPQ_PARSE} etc.) to match a known neighbour. A frame the options
+   * reject is dropped before tracing or dispatch — the listener is deaf to it,
+   * exactly as if it had failed CRC. Outbound construction is unaffected
+   * (frames we build are always strict). Mirrors C#
+   * `Ax25ListenerOptions.ParseOptions` (packet.net#366).
+   */
+  parseOptions?: Ax25ParseOptions;
+
+  /**
+   * SDL figure-defect / de-facto-interop quirks seeded onto each new
+   * session's context. If omitted, sessions use the spec-correct defaults
+   * (`defaultSessionQuirks`). Pass `strictlyFaithfulQuirks` to run the SDL
+   * figures exactly as drawn, defects included — conformance study only, not
+   * for on-air use. Mirrors C# `Ax25ListenerOptions.Quirks` (packet.net#366).
+   */
+  quirks?: Ax25SessionQuirks;
+
   /**
    * Optional hook called once per newly-built session, before any events
    * flow into it. Use to attach onData / onDisconnect handlers on the
@@ -269,10 +296,11 @@ export class Ax25Listener {
   readonly myCall: Callsign;
   private readonly transport: Ax25Transport;
   private readonly options: Required<
-    Omit<Ax25ListenerOptions, "myCall" | "configureSession" | "onHandlerError">
+    Omit<Ax25ListenerOptions, "myCall" | "configureSession" | "onHandlerError" | "quirks">
   > & {
     configureSession?: (session: Ax25ListenerSession) => void;
     onHandlerError: (err: unknown) => void;
+    quirks?: Ax25SessionQuirks;
   };
   /** Per-peer cache keyed by the peer's canonical callsign string. */
   private readonly sessions = new Map<string, CachedSession>();
@@ -299,6 +327,8 @@ export class Ax25Listener {
       n2: options.n2 ?? 10,
       k: options.k ?? 4,
       maxCachedPeers: options.maxCachedPeers ?? 64,
+      parseOptions: options.parseOptions ?? LENIENT_PARSE,
+      quirks: options.quirks,
       configureSession: options.configureSession,
       onHandlerError:
         options.onHandlerError ??
@@ -526,6 +556,41 @@ export class Ax25Listener {
     }
   }
 
+  /**
+   * Send a connectionless AX.25 **TEST command** frame (§4.3.4.2) — the
+   * "axping" probe. A spec-compliant responder echoes the information field
+   * back in a TEST *response*; the caller correlates that response (via
+   * {@link onFrameTraced}) to measure round-trip time. Like {@link sendUi}
+   * this bypasses the session layer entirely (no connection needed). Not
+   * every node implements TEST — a peer that doesn't simply never responds
+   * (the caller sees a timeout / loss), which is not an error. Mirrors the C#
+   * `Ax25Listener.SendTestAsync` (packet.net#348).
+   *
+   * @param destination The station to probe.
+   * @param info The probe's information field (echoed back verbatim).
+   * @param pollFinalBit P bit; defaults `true` (a command soliciting a response).
+   */
+  async sendTest(
+    destination: Callsign,
+    info: Uint8Array,
+    pollFinalBit = true,
+  ): Promise<void> {
+    if (this.disposed) throw new Error("Ax25Listener has been disposed");
+    const frame = test({
+      destination,
+      source: this.myCall,
+      info,
+      isCommand: true,
+      pollFinal: pollFinalBit,
+    });
+    await this.transport.send(encodeFrame(frame));
+    try {
+      this.traceFrame(frame, "tx");
+    } catch (err) {
+      this.options.onHandlerError(err);
+    }
+  }
+
   /** Stop the inbound pump and release the transport. */
   async stop(): Promise<void> {
     if (!this.startedFlag) return;
@@ -564,10 +629,14 @@ export class Ax25Listener {
       // modulo). Addresses precede the control field and are modulo-
       // independent, so session lookup is always valid; an extended (mod-128)
       // I/S frame's 2-octet control field is re-decoded session-side in
-      // dispatchInbound once the modulo is known.
-      frame = decodeFrame(bytes);
+      // dispatchInbound once the modulo is known. Parsed under the listener's
+      // configured options: a frame they reject is dropped here — before
+      // tracing and dispatch — so a strict listener is deaf to it end-to-end
+      // (no session can open from it, and the monitor doesn't see it either).
+      // Mirrors the C# listener's inbound pump (packet.net#366).
+      frame = decodeFrame(bytes, false, this.options.parseOptions);
     } catch {
-      return; // malformed wire bytes — drop quietly
+      return; // malformed / options-rejected wire bytes — drop quietly
     }
     // Trace + dispatch are isolated per-step so a throwing handler can't
     // tear the pump down. A buggy consumer must not be able to DoS the
@@ -589,6 +658,28 @@ export class Ax25Listener {
     if (!routed.destination.callsign.equals(this.myCall)) {
       return;
     }
+
+    // Connectionless TEST (§4.3.4.2), addressed to us — handle it BEFORE any
+    // session routing. TEST is link-independent: it must never enter the
+    // session machine (where it would fall to the Disconnected t05 catch-all
+    // and provoke a spurious DM, or disturb a live QSO's state).
+    //
+    //   • TEST *command*  → we are the responder: reply with a TEST response
+    //     echoing the information field (the "axping" answer).
+    //   • TEST *response* → the echo to our own probe. The initiator
+    //     correlates it via frameTraced, which already fired upstream — so we
+    //     simply absorb it here rather than provoke a DM at a station that
+    //     just answered us.
+    //
+    // Either way we return without touching a session. Mirrors the C#
+    // listener's TEST intercept (packet.net#348).
+    if (classify(routed) === "TEST") {
+      if (frameIsCommand(routed)) {
+        this.respondToTest(routed);
+      }
+      return;
+    }
+
     const peer = routed.source.callsign;
     const peerKey = peer.toString();
 
@@ -599,7 +690,12 @@ export class Ax25Listener {
       // negotiated modulo before classifying so an extended (mod-128) I/S
       // frame's N(S)/N(R)/PID/info land correctly (mirrors the C# listener's
       // ReparseAtSessionModulo).
-      const parsed = reparseAtSessionModulo(routed, bytes, cached.session.context);
+      const parsed = reparseAtSessionModulo(
+        routed,
+        bytes,
+        cached.session.context,
+        this.options.parseOptions,
+      );
       // Classify the frame into the SDL event the dispatcher should receive. A
       // spec-violating frame (info on an S / no-info U frame; unknown U control
       // byte) maps to the matching error event here — so the figc4.x error-input
@@ -677,7 +773,7 @@ export class Ax25Listener {
     // Transient fall-through:
     //   SABM-shape with acceptIncoming=false → figc4.1 t15 emits DM.
     //   DISC/UI/UA unknown peer            → specific Disconnected transition.
-    //   RR/RNR/REJ/SREJ/I/FRMR/XID/TEST    → reclassify as all_other_commands
+    //   RR/RNR/REJ/SREJ/I/FRMR/XID         → reclassify as all_other_commands
     //                                          so t05 fires DM.
     // Build, post, drop. No cache write, no SessionAccepted event.
     // (#143 carry-over.)
@@ -702,9 +798,43 @@ export class Ax25Listener {
     return built;
   }
 
+  /**
+   * Answer an inbound connectionless TEST *command* (§4.3.4.2) with a TEST
+   * *response* echoing the command's information field verbatim. The
+   * response's F bit mirrors the command's P bit; the source is this
+   * station's call. Fire-and-forget — a failed send (transport torn down
+   * mid-flight) must not tear the inbound pump down. Mirrors the C#
+   * listener's `RespondToTest` (packet.net#348).
+   */
+  private respondToTest(command: Ax25Frame): void {
+    const frame = test({
+      destination: command.source.callsign,
+      source: this.myCall,
+      // Copy the echoed info: the pump may reuse the inbound buffer.
+      info: command.info.slice(),
+      isCommand: false,
+      pollFinal: framePollFinal(command),
+    });
+    void this.transport
+      .send(encodeFrame(frame))
+      .then(() => {
+        // Trace AFTER the send so the monitor's TX order matches the wire.
+        try {
+          this.traceFrame(frame, "tx");
+        } catch (err) {
+          this.options.onHandlerError(err);
+        }
+      })
+      .catch((err) => this.options.onHandlerError(err));
+  }
+
   private buildSession(peer: Callsign, allowAccept: boolean): CachedSession {
     const ctx = createSessionContext(this.myCall, peer);
     ctx.acceptIncoming = allowAccept;
+    // Seed the listener's configured session quirks before any SDL transition
+    // runs (createSessionContext starts from the spec-correct defaults).
+    // Mirrors the C# listener's BuildSession quirks seed (packet.net#366).
+    if (this.options.quirks) ctx.quirks = { ...this.options.quirks };
     ctx.n2 = this.options.n2;
     ctx.k = this.options.k;
     if (this.options.t1Ms !== undefined) ctx.t1vMs = this.options.t1Ms;
@@ -862,13 +992,16 @@ function reparseAtSessionModulo(
   routed: Ax25Frame,
   bytes: Uint8Array,
   ctx: Ax25SessionContext,
+  parseOptions: Ax25ParseOptions,
 ): Ax25Frame {
   if (!ctx.isExtended) return routed; // mod-8 link: the routing parse was correct
   if (routed.controlExtension !== null) return routed; // already 2-octet (defensive)
   const isUFrame = (routed.control & 0x03) === 0x03; // U frames are 1 octet in both modes
   if (isUFrame) return routed;
   try {
-    return decodeFrame(bytes, true);
+    // Same options as the routing parse — a frame can't get stricter or
+    // looser treatment just because its session negotiated mod-128.
+    return decodeFrame(bytes, true, parseOptions);
   } catch {
     return routed;
   }
@@ -877,7 +1010,7 @@ function reparseAtSessionModulo(
 /**
  * Map an inbound classified event to the event the Disconnected SDL knows
  * how to handle. Specific events handled in Disconnected (DISC/UI/UA/SABM/SABME)
- * pass through unchanged; everything else (RR/RNR/REJ/SREJ/I/FRMR/XID/TEST, plus
+ * pass through unchanged; everything else (RR/RNR/REJ/SREJ/I/FRMR/XID, plus
  * the spec-violation error events) becomes `all_other_commands` so the SDL's t05
  * catch-all emits DM. See figc4.1 — the catch-all is named "all other commands"
  * precisely for this case. Mirrors the C# `ReclassifyForDisconnectedCatchAll`

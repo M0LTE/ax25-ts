@@ -45,3 +45,45 @@ jobs:
         # `npm test` excludes tests/integration/** (those run in
         # m0lte/packet.net's interop job, where the docker stack lives).
         run: npm test
+
+  parity:
+    name: parity vs packet.net (drift guard)
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      # The C# libraries in m0lte/packet.net are the reference runtime. This
+      # job extracts the named-flag / preset / listener-surface inventories
+      # from packet.net main and compares them to ours, failing on any gap
+      # that is not a reviewed exception in scripts/parity-exceptions.json.
+      # The mirror of this check runs in packet.net's interop.yml (against its
+      # PR head + our main) — packet.net is PRIVATE, so that copy is the one
+      # that needs no credentials and is always armed; this one needs a
+      # fine-grained read-only PAT for packet.net (Contents: read) stored as
+      # the PACKETNET_READ_TOKEN secret. Without the secret the job warns and
+      # skips rather than blocking every PR — add the token to arm it.
+      - name: clone m0lte/packet.net (shallow, source only)
+        env:
+          PACKETNET_READ_TOKEN: ${{ secrets.PACKETNET_READ_TOKEN }}
+        run: |
+          if [ -z "$PACKETNET_READ_TOKEN" ]; then
+            echo "::warning title=parity drift guard not armed::PACKETNET_READ_TOKEN secret is not set, and m0lte/packet.net is private — the TS-side parity check was SKIPPED. The packet.net-side mirror (interop.yml) still enforces. To arm this side: create a fine-grained PAT with read-only Contents access to m0lte/packet.net and add it as the PACKETNET_READ_TOKEN actions secret."
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rm -rf "${RUNNER_TEMP}/packet.net"
+          git clone --depth=1 --branch main --filter=blob:none --sparse \
+            "https://x-access-token:${PACKETNET_READ_TOKEN}@github.com/m0lte/packet.net.git" "${RUNNER_TEMP}/packet.net"
+          git -C "${RUNNER_TEMP}/packet.net" sparse-checkout set src/Packet.Core src/Packet.Ax25
+
+      - name: parity check
+        run: |
+          if [ ! -d "${RUNNER_TEMP}/packet.net/src" ]; then
+            echo "parity check skipped (no packet.net clone — see the warning above)."
+            exit 0
+          fi
+          node scripts/parity-check.mjs --csharp "${RUNNER_TEMP}/packet.net"
