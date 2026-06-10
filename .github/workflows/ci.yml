@@ -45,3 +45,31 @@ jobs:
         # `npm test` excludes tests/integration/** (those run in
         # m0lte/packet.net's interop job, where the docker stack lives).
         run: npm test
+
+  parity:
+    name: parity vs packet.net (drift guard)
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      # The C# libraries in m0lte/packet.net are the reference runtime. This
+      # job extracts the named-flag / preset / listener-surface inventories
+      # from packet.net main and compares them to ours, failing on any gap
+      # that is not a reviewed exception in scripts/parity-exceptions.json.
+      # The mirror of this check runs in packet.net's interop.yml (against its
+      # PR head + our main), so drift fails CI on whichever side introduces
+      # it. No build of either repo is needed — a shallow source clone is
+      # enough.
+      - name: clone m0lte/packet.net (shallow, source only)
+        run: |
+          rm -rf "${RUNNER_TEMP}/packet.net"
+          git clone --depth=1 --branch main --filter=blob:none --sparse \
+            https://github.com/m0lte/packet.net.git "${RUNNER_TEMP}/packet.net"
+          git -C "${RUNNER_TEMP}/packet.net" sparse-checkout set src/Packet.Core src/Packet.Ax25
+
+      - name: parity check
+        run: node scripts/parity-check.mjs --csharp "${RUNNER_TEMP}/packet.net"

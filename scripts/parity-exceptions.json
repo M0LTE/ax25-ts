@@ -1,0 +1,12 @@
+{
+  "$comment": "Reviewed, intentional divergences from the C# reference (m0lte/packet.net). Every entry is a decision with a reason — scripts/parity-check.mjs treats anything NOT listed here as drift and fails CI. Remove an entry when the TS counterpart lands. Scope note: the listener-surface comparison covers C# public METHODS and EVENTS; C# read-only properties (MyCall, IsRunning, ActiveSessions, CurrentSessionParameters, AcceptIncoming) are deliberately outside the extractor — they are inspection conveniences, not behaviour.",
+  "parseOptionFlags": {},
+  "parsePresets": {},
+  "quirkFlags": {},
+  "quirkPresets": {},
+  "xidFlags": {},
+  "listenerOptions": {},
+  "listenerSurface": {
+    "UpdateSessionParameters": "Live per-listener reseed is driven by packet.net's node-host hot-reload; browser consumers reconstruct the listener instead. Revisit if a TS host needs hot reconfig."
+  }
+}

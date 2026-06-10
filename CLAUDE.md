@@ -18,6 +18,10 @@ Extracted from `m0lte/packet.net` on 2026-05-17 (history-preserving via `git fil
 
 ## Hard rules
 
+### Parity with the C# reference is CI-enforced
+
+This library tracks the C# reference implementation in `m0lte/packet.net` behaviour-for-behaviour. `scripts/parity-check.mjs` compares the named-flag inventories (`Ax25ParseOptions`, `Ax25SessionQuirks`, `XidParseOptions`), the presets, and the listener options/surface between the two repos, and **fails CI on any undocumented gap** — it runs here (the `parity` job in `ci.yml`, against packet.net `main`) and in packet.net's `interop.yml` (against its PR head + our `main`), so drift fails on whichever side introduces it. When packet.net gains a named flag or listener feature, either ship the TS counterpart (with the paired strict-rejects / lenient-accepts tests, mirroring their flag discipline) or record a *reviewed* exception with a reason in `scripts/parity-exceptions.json` — an exception is a decision, not a hole. Remove the entry when the counterpart lands.
+
 ### Consume `ax25sdl` from npm, never hand-edit generated tables
 
 The AX.25 SDL state-machine tables come from the [`ax25sdl`](https://www.npmjs.com/package/ax25sdl) npm package, built and published by [`m0lte/ax25sdl`](https://github.com/m0lte/ax25sdl). **Do not** vendor, regenerate, or modify those tables from this repo. If a change is needed in the spec data, raise it against `m0lte/ax25sdl`, publish a new version, and bump the `ax25sdl` dep in `package.json`.
