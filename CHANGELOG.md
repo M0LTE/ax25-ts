@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-06-10
+
 ### Added
 
 - **Parity with the C# reference at packet.net lib-v0.7.0** ([#55](https://github.com/M0LTE/ax25-ts/pull/55)) — `Ax25ParseOptions` gains `allowEmptyCallsignBase` + `allowCommandFrameAsResponse` (optional, absent = lenient — the historical behaviour; `STRICT_PARSE` now rejects an all-space callsign slot per §3.12 and a response-direction SABM/SABME/DISC per §4.3.3.1 / [packet.net#142](https://github.com/m0lte/packet.net/issues/142) at decode) plus the `BPQ_PARSE` / `XROUTER_PARSE` / `DIREWOLF_PARSE` peer presets. Connectionless **TEST / axping** (§4.3.4.2, [packet.net#348](https://github.com/m0lte/packet.net/pull/348) parity): the listener answers an inbound TEST command with the echoing response (F mirrors P) before any session routing — previously it fell to the Disconnected catch-all and answered **DM** — and absorbs TEST responses; new `test()` frame factory, `"TEST"` `FrameKind`, and `Ax25Listener.sendTest()` probe initiator. `Ax25ListenerOptions` gains `parseOptions` (applied live at the inbound decode + the mod-128 re-parse; a rejected frame is dropped before trace/dispatch — a strict listener is deaf to it end-to-end) and `quirks` (seeded onto each newly-built session), mirroring [packet.net#366](https://github.com/m0lte/packet.net/issues/366). 13 new paired strict-rejects/lenient-accepts tests.
