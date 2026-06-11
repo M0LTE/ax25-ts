@@ -7,6 +7,8 @@
   "xidFlags": {},
   "listenerOptions": {},
   "listenerSurface": {
-    "UpdateSessionParameters": "Live per-listener reseed is driven by packet.net's node-host hot-reload; browser consumers reconstruct the listener instead. Revisit if a TS host needs hot reconfig."
+    "UpdateSessionParameters": "Live per-listener reseed is driven by packet.net's node-host hot-reload; browser consumers reconstruct the listener instead. Revisit if a TS host needs hot reconfig.",
+    "AddLocalAlias": "Multi-callsign acceptance (the node answers for app callsigns registered by packet.net's RHPv2 server, e.g. a DAPPS instance's callsign). Node-host capability; a browser consumer constructs one listener per identity instead. TS leg tracked as a follow-up if a TS host needs it.",
+    "RemoveLocalAlias": "Pair of AddLocalAlias — see that entry."
   }
 }
