@@ -148,6 +148,14 @@ export class SdlSessionDriver {
   private readonly hooks: SessionDriverHooks;
   private readonly pendingEvents: Ax25Event[] = [];
   /**
+   * ax25spec#9 (`ax25Spec9AckProgressResetsRc`): set when a committed transition
+   * advances V(A) (the peer acknowledged NEW data); consumed at the next
+   * `T1_expiry` to clamp RC to 1 before the figures' `RC === N2` guard. See the
+   * quirk doc on {@link Ax25SessionQuirks.ax25Spec9AckProgressResetsRc} and the
+   * two-step handling in {@link dispatchOne}.
+   */
+  private vaAdvancedSinceT1Expiry = false;
+  /**
    * The state→page map this driver walks. Defaults to the data-link
    * {@link STATE_PAGES}; the MDL driver passes {@link MDL_STATE_PAGES} so the
    * same driver/dispatcher/guard machinery runs the 2-state management FSM.
@@ -243,6 +251,26 @@ export class SdlSessionDriver {
       throw new Error(`no SDL page for current state '${this.state}'`);
     }
 
+    // ax25spec#9 (ax25Spec9AckProgressResetsRc), step 2 of 2: the figures only
+    // reset RC on the fully-acked Timer-Recovery checkpoint (…_yes_yes_yes →
+    // Connected re-initialises RC), so a sustained transfer that lives in Timer
+    // Recovery with frames always in flight ratchets RC across a WORKING link
+    // and dies (t21_t1_expiry_yes_no: DL-ERROR I → DM) at the N2'th lifetime T1
+    // hiccup — reproduced by packet.net's tools/Packet.LinkBench over net-sim.
+    // If V(A) advanced since the last T1 expiry, the link is demonstrably alive,
+    // so this expiry is the FIRST of a new consecutive-failure run: clamp RC to
+    // 1 before the RC === N2 guard is evaluated (the guard runs inside the
+    // TimerRecovery page's transition selection below). Clamping (not zeroing)
+    // keeps Select_T1's RC==0 Karn branch meaning what the figures intend ("no
+    // retransmission in progress, round-trip sample is clean"). Mirrors the C#
+    // Ax25Session.DispatchEvent pre-clamp (m0lte/packet.net feat/link-bench).
+    if (event.name === "T1_expiry" && this.context.quirks.ax25Spec9AckProgressResetsRc) {
+      if (this.vaAdvancedSinceT1Expiry && this.context.rc > 1) {
+        this.context.rc = 1;
+      }
+      this.vaAdvancedSinceT1Expiry = false;
+    }
+
     this.currentTrigger = event;
     try {
       const match = this.findMatchingTransition(page, event);
@@ -263,6 +291,7 @@ export class SdlSessionDriver {
         subroutines: this.subroutines,
         postEvent: (evt) => this.pendingEvents.push(evt),
       };
+      const vaBefore = this.context.va;
       this.applyPreExecutionQuirks(match);
       executeWithLoops(
         match.actions,
@@ -273,6 +302,18 @@ export class SdlSessionDriver {
         this.state,
       );
       this.state = this.resolveNextState(match);
+
+      // ax25spec#9 (ax25Spec9AckProgressResetsRc), step 1 of 2: note that this
+      // transition advanced V(A) — the peer acknowledged NEW data. The RC clamp
+      // itself happens at the next T1 expiry (step 2 above); RC is deliberately
+      // NOT reset here because RC==0 is also the figures' Karn signal to
+      // Select_T1 ("no retransmission in progress — safe to sample the round
+      // trip"), and a mid-recovery zero would feed retransmit-polluted samples
+      // into the SRT estimator. Mirrors the C# Ax25Session.DispatchEvent
+      // post-commit V(A) note (m0lte/packet.net feat/link-bench).
+      if (this.context.va !== vaBefore) {
+        this.vaAdvancedSinceT1Expiry = true;
+      }
     } finally {
       this.currentTrigger = null;
     }

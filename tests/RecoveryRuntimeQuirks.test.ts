@@ -9,9 +9,12 @@
  *   4. `ax25Spec42SrejTargetsGap` — retarget the SREJ to the missing gap.
  *   5. `ax25Spec47TimerRecoveryDrainAdvancesVR` — figc4.5 stored-frame drain
  *      advances V(R) (rewrite `V(r) := V(r) - 1` → `V(r) := V(r) + 1`).
+ *   6. `ax25Spec9AckProgressResetsRc` — a T1 expiry that followed V(A)-advancing
+ *      progress clamps RC to 1 before the figures' `RC = N2` guard.
  *
  * TS ports of packet.net's `DataLinkConnectedRetransmitTests` +
- * `Ax25SessionQuirksTests` (m0lte/packet.net #232/#241/#242/#246/#286).
+ * `Ax25SessionQuirksTests` + `Ax25Spec9RcResetQuirkTests`
+ * (m0lte/packet.net #232/#241/#242/#246/#286 + feat/link-bench).
  */
 import { describe, expect, it } from "vitest";
 import { Callsign } from "../src/callsign.js";
@@ -21,6 +24,7 @@ import {
   getNs,
   iFrame,
   rej,
+  rr,
 } from "../src/frame.js";
 import {
   ActionDispatcher,
@@ -35,12 +39,17 @@ import {
   type Ax25SessionContext,
   createSessionContext,
 } from "../src/sdl/session-context.js";
+import { SdlSessionDriver } from "../src/sdl/session-driver.js";
 import {
   defaultSessionQuirks,
   strictlyFaithfulSessionQuirks,
 } from "../src/sdl/session-quirks.js";
 import { DefaultSubroutineRegistry } from "../src/sdl/subroutine-registry.js";
-import { RealTimerScheduler } from "../src/sdl/timer-scheduler.js";
+import {
+  RealTimerScheduler,
+  type TimerName,
+  type TimerScheduler,
+} from "../src/sdl/timer-scheduler.js";
 
 const PID = 0xf0;
 
@@ -376,5 +385,142 @@ describe("ax25Spec47TimerRecoveryDrainAdvancesVR quirk (packet.net#286)", () => 
     // V(r) assignment) untouched, advancing exactly once.
     newRig(ctx).run(drainEvent(), [{ verb: "V(r) := V(r) + 1" }]);
     expect(ctx.vr).toBe(2);
+  });
+});
+
+describe("ax25Spec9AckProgressResetsRc quirk (packet.net feat/link-bench, ax25spec#9)", () => {
+  const local = Callsign.parse("M0LTE");
+  const remote = Callsign.parse("G7XYZ-7");
+
+  /**
+   * Deterministic manually-clocked scheduler — timers fire only on an explicit
+   * {@link ManualScheduler.advance}. The TS analogue of packet.net's
+   * `FakeTimeProvider` + `SystemTimerScheduler`. (These tests drive T1 expiry by
+   * posting the `T1_expiry` event directly, mirroring the C# test's
+   * `session.PostEvent(new T1Expiry())`, so the scheduler is only here to satisfy
+   * the driver's arming/cancelling of timers without a real clock.)
+   */
+  class ManualScheduler implements TimerScheduler {
+    private nowMs = 0;
+    private readonly armed = new Map<
+      TimerName,
+      { endMs: number; onExpiry: () => void }
+    >();
+    arm(name: TimerName, durationMs: number, onExpiry: () => void): void {
+      this.armed.set(name, { endMs: this.nowMs + durationMs, onExpiry });
+    }
+    cancel(name: TimerName): void {
+      this.armed.delete(name);
+    }
+    isRunning(name: TimerName): boolean {
+      return this.armed.has(name);
+    }
+    timeRemainingMs(name: TimerName): number {
+      const t = this.armed.get(name);
+      if (!t) return 0;
+      const r = t.endMs - this.nowMs;
+      return r > 0 ? r : 0;
+    }
+  }
+
+  /**
+   * A session parked mid-recovery in Timer Recovery: three I-frames in flight
+   * (V(s)=3, V(a)=0), several T1 hiccups already on RC. Mirrors the C#
+   * `NewTimerRecoverySession` fixture.
+   */
+  function newTimerRecoverySession(
+    quirks: Ax25SessionContext["quirks"],
+  ): { driver: SdlSessionDriver; ctx: Ax25SessionContext } {
+    const ctx = createSessionContext(local, remote);
+    ctx.quirks = { ...quirks };
+    ctx.vs = 3;
+    ctx.va = 0;
+    ctx.rc = 7;
+    for (let ns = 0; ns < 3; ns++) {
+      ctx.sentIFrames.set(ns, { data: new Uint8Array([ns]), pid: PID });
+    }
+    const driver = new SdlSessionDriver(ctx, new ManualScheduler(), {
+      sendFrame: () => {},
+      emitUpward: () => {},
+      freezeT1V: true,
+      t1Ms: 1000,
+    });
+    driver.setState("TimerRecovery");
+    return { driver, ctx };
+  }
+
+  /** Inbound mod-8 RR response addressed to us, N(R)=`nr`, F=0. */
+  function rrResponse(nr: number): Ax25Event {
+    return {
+      name: "RR_received",
+      frame: rr({
+        destination: local,
+        source: remote,
+        nr,
+        isCommand: false,
+        pollFinal: false,
+      }),
+    };
+  }
+
+  it("on: a T1 expiry after ack progress clamps RC to 1 (before RC=N2)", () => {
+    const { driver, ctx } = newTimerRecoverySession(defaultSessionQuirks);
+
+    // An ack advances V(A) (progress — the link is alive) …
+    driver.postEvent(rrResponse(1));
+    expect(ctx.va).toBe(1); // the RR acknowledged frame 0
+    // RC is untouched at ack time — RC==0 is Select_T1's Karn sampling signal,
+    // so the clamp waits for the next T1 expiry.
+    expect(ctx.rc).toBe(7);
+
+    // … so the NEXT T1 expiry starts a fresh consecutive-failure run: the expiry
+    // clamps RC to 1 BEFORE the RC=N2 guard, then the figure's own RC:=RC+1 runs.
+    driver.postEvent({ name: "T1_expiry" });
+    expect(ctx.rc).toBe(2);
+    // With RC clamped below N2 the link re-polls instead of dying.
+    expect(driver.currentState).toBe("TimerRecovery");
+  });
+
+  it("on: a T1 expiry with no progress keeps ratcheting (a dead link still exhausts N2)", () => {
+    const { driver, ctx } = newTimerRecoverySession(defaultSessionQuirks);
+
+    // A duplicate ack (N(R)=V(A)) acknowledges nothing new — no progress.
+    driver.postEvent(rrResponse(0));
+    expect(ctx.va).toBe(0); // N(R)=V(A) acknowledges nothing new
+
+    driver.postEvent({ name: "T1_expiry" });
+    // No forward progress since the last expiry — the consecutive-failure
+    // ratchet continues toward N2.
+    expect(ctx.rc).toBe(8);
+  });
+
+  it("on: progress then silence dies after N2 consecutive failures, not before", () => {
+    const { driver, ctx } = newTimerRecoverySession(defaultSessionQuirks);
+
+    // Progress resets the run …
+    driver.postEvent(rrResponse(1));
+
+    // … then the peer goes silent: N2 consecutive unanswered expiries must still
+    // kill the link (the watchdog is weakened only against hiccups on a
+    // progressing link, never against a genuinely dead one).
+    for (let i = 0; i < ctx.n2; i++) {
+      expect(driver.currentState).toBe("TimerRecovery"); // within the N2 budget
+      driver.postEvent({ name: "T1_expiry" });
+    }
+
+    // RC reached N2 with no intervening progress — genuine link failure.
+    expect(driver.currentState).toBe("Disconnected");
+  });
+
+  it("off (strictly faithful): RC ratchets across a working link (figure as drawn)", () => {
+    const { driver, ctx } = newTimerRecoverySession(strictlyFaithfulSessionQuirks);
+
+    driver.postEvent(rrResponse(1));
+    expect(ctx.va).toBe(1); // the figure's ack processing is untouched
+
+    driver.postEvent({ name: "T1_expiry" });
+    // As drawn, progress never clamps RC — only the fully-acked checkpoint path
+    // resets it.
+    expect(ctx.rc).toBe(8);
   });
 });
