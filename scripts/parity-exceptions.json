@@ -5,7 +5,9 @@
   "quirkFlags": {},
   "quirkPresets": {},
   "xidFlags": {},
-  "listenerOptions": {},
+  "listenerOptions": {
+    "RestartT1OnTxComplete": "TX-complete→T1: re-arms a running T1 from the TNC's ACKMODE TX-completion echo (packet.net kiss.t1FromTxComplete). The echo is a TNC/node-host transport capability; no TS transport implements SendFrameWithAckAsync today, so the option would be inert. Add the TS leg when an ACKMODE-capable TS transport exists."
+  },
   "listenerSurface": {
     "UpdateSessionParameters": "Live per-listener reseed is driven by packet.net's node-host hot-reload; browser consumers reconstruct the listener instead. Revisit if a TS host needs hot reconfig.",
     "AddLocalAlias": "Multi-callsign acceptance (the node answers for app callsigns registered by packet.net's RHPv2 server, e.g. a DAPPS instance's callsign). Node-host capability; a browser consumer constructs one listener per identity instead. TS leg tracked as a follow-up if a TS host needs it.",
